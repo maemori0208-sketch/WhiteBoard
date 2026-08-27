@@ -2,7 +2,9 @@
 <html lang="ja">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover">
+<!-- maximum-scale は付けない。付けるとブラウザのピンチ拡大が禁じられ、
+     小さい文字を拡大できなくなるため -->
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <!-- このアプリは独自の配色テーマ（ダーク含む）を持っているため、
      Dark Reader などの拡張機能による自動反転を辞退する。
      拡張機能が対応していない場合に備え、下の CSS でも配色を明示している。 -->
@@ -13,7 +15,7 @@
      単一ファイルで使う場合は消してかまいません。 -->
 <link rel="apple-touch-icon" href="icon-180.png">
 <link rel="manifest" href="manifest.json">
-<meta name="theme-color" content="#1d2827">
+<meta name="theme-color" content="#1d2827"><!-- content はテーマ切替に合わせて applyThemeById が書き換える -->
 <title>ホワイトボード</title>
 <!--
   設計メモ（file:// で直接開く前提のため守っている制約）
@@ -40,6 +42,19 @@
   --warn:#a2560f;
   --chrome-fg:#e6ecea;
   --grid:#c9d2ce;
+  /* 上下バーやパネルの細部の色も変数にしておく。直に 16 進で書くと
+     テーマを切り替えたときにここだけ前のテーマの色が残るため。
+     値は applyThemeById が setProperty で差し替える。 */
+  --hover:#3a4a47;   /* ボタンのホバー地・縦の区切り線 */
+  --edge:#465653;    /* select の枠 */
+  --rule:#33403e;    /* パネル内・ステータスの細い区切り線 */
+  --muted:#4a5b58;   /* 「未変更」を表す点 */
+  /* 上下バーの高さは固定値で持つ。高さが変わると #wrap の高さが変わり、
+     ドラッグ中にキャンバスの原点が動いて図形がずれるため。 */
+  --bar-h:46px;
+  --status-h:28px;
+  --dock-h:0px;      /* 下部ドックの高さ。広い画面ではツールは左の縦レールなので 0 */
+  --tap:34px;        /* 押す部品の最小の高さ。狭い画面では 44px に上げる */
   --ui: system-ui, -apple-system, "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", "Meiryo", sans-serif;
   --mono: ui-monospace, SFMono-Regular, Consolas, "Courier New", monospace;
 }
@@ -50,34 +65,171 @@ body{
   overflow:hidden; -webkit-font-smoothing:antialiased;
   color-scheme:dark;          /* 上下バーは常に暗色なので、標準部品もそれに合わせる */
 }
-#app{ display:flex; flex-direction:column; height:100%; }
+/* 浮かせた UI のうち、ツールレール・ズーム・メニューは #wrap ではなく #app の子にする。
+   #wrap の子にすると touch-action:none を継承してスクロールできなくなり、
+   さらにキャンバスのポインタ処理と取り合いになるため。 */
+#app{ display:flex; flex-direction:column; height:100%; position:relative; }
 
-/* ── 上部バー ───────────────────────────── */
+/* ── 上部バー（アプリ全体の操作だけを置く） ─────── */
 .bar{
-  display:flex; align-items:center; gap:12px; flex-wrap:wrap;
-  padding:7px 12px; background:var(--ink-800); color:var(--chrome-fg);
-  border-bottom:1px solid #000;
+  display:flex; align-items:center; gap:8px; flex-wrap:nowrap;
+  background:var(--ink-800); color:var(--chrome-fg);
 }
+#toolbar{
+  position:relative; z-index:12; flex:0 0 auto;
+  height:calc(var(--bar-h) + env(safe-area-inset-top));
+  padding:env(safe-area-inset-top) calc(10px + env(safe-area-inset-right)) 0 calc(10px + env(safe-area-inset-left));
+  border-bottom:1px solid #000;
+  /* 320px 級の端末で万一あふれても、届かない項目が出ないようにする。
+     360px では折り返しも横スクロールも起きない量に絞ってある。 */
+  overflow-x:auto; overflow-y:hidden; scrollbar-width:none;
+}
+#toolbar::-webkit-scrollbar{ display:none; }
+.spacer{ flex:1 1 auto; }
+.brand{ display:flex; align-items:center; gap:8px; white-space:nowrap; flex:0 0 auto; }
+.brand .mark{ width:24px; height:24px; flex:0 0 auto; display:block; }
+.brandtx{ font-size:12.5px; font-weight:650; letter-spacing:.14em; opacity:.75; }
+
+.group{ display:flex; align-items:center; gap:2px; background:var(--ink-700); padding:2px; border-radius:8px; }
+.group[hidden]{ display:none; }
+.sep{ width:1px; height:22px; background:var(--hover); flex:0 0 auto; }
+.tag{ font-size:11px; opacity:.6; padding:0 6px 0 4px; white-space:nowrap; }
+
+button{
+  font-family:var(--ui); font-size:12.5px; color:var(--chrome-fg);
+  background:transparent; border:0; border-radius:6px;
+  padding:0 9px; min-height:var(--tap); cursor:pointer; line-height:1.2; white-space:nowrap;
+  display:inline-flex; align-items:center; justify-content:center; gap:6px;
+  transition:background-color .12s linear;
+}
+/* 触る端末では :hover が押したあとも残るので、ホバーできる環境だけに限る */
+@media (hover:hover){
+  button:hover{ background:var(--hover); }
+  button[disabled]:hover{ background:transparent; }
+}
+button:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:1px; }
+button[aria-pressed="true"]{ background:var(--accent); color:#fff; }
+button[disabled]{ opacity:.35; cursor:default; }
+button .k{ opacity:.55; font-family:var(--mono); font-size:10.5px; }
+
+/* アイコンは file:// でも確実に出るよう、外部フォントに頼らず手書きの SVG にする */
+.ic{
+  width:20px; height:20px; display:block; flex:0 0 auto;
+  fill:none; stroke:currentColor; stroke-width:1.8; stroke-linecap:round; stroke-linejoin:round;
+}
+.ic.dots circle{ fill:currentColor; stroke:none; }
+
+/* 背景を transparent にしておくと、開いた一覧の地色が環境任せになり、
+   明るい地に明るい文字が重なって読めなくなることがある。
+   地色と文字色を両方とも明示しておく。 */
+select{
+  font-family:var(--ui); font-size:12.5px;
+  color:var(--chrome-fg);
+  background-color:var(--ink-900);
+  border:1px solid var(--edge); border-radius:6px;
+  padding:0 6px; min-height:var(--tap); cursor:pointer;
+  color-scheme:dark;
+}
+select:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:1px; }
+select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
+
+.sw{
+  width:26px; height:26px; min-height:0; padding:0; border-radius:6px;
+  box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);
+}
+/* 地色はインラインの style で塗るので、ここで background は指定しない（負けるだけ） */
+@media (hover:hover){ .sw:hover{ box-shadow:inset 0 0 0 1px rgba(255,255,255,.6); } }
+.sw[aria-pressed="true"]{ box-shadow:inset 0 0 0 2px #fff, 0 0 0 2px var(--accent); }
+.sw.none{ background-image:linear-gradient(135deg,transparent 44%,var(--warn) 44%,var(--warn) 56%,transparent 56%); }
+
+/* ── ツールレール（広い画面では左端に縦置き） ───── */
+#tools{
+  position:absolute; z-index:11;
+  left:calc(12px + env(safe-area-inset-left));
+  top:calc(var(--bar-h) + env(safe-area-inset-top) + 12px);
+  display:flex; flex-direction:column; gap:4px; padding:5px;
+  background:var(--ink-800); border:1px solid #000; border-radius:12px;
+  box-shadow:0 6px 20px rgba(0,0,0,.35);
+  /* 背の低いウィンドウでステータスバーに潜り込まないようにする */
+  max-height:calc(100% - var(--bar-h) - var(--status-h) - 24px); overflow-y:auto;
+}
+#tools button{
+  flex-direction:column; gap:2px; padding:4px 3px;
+  width:54px; min-height:48px; font-size:10.5px;
+}
+#tools .tl{ line-height:1.1; }
+#tools button.act{ background:var(--accent); color:#fff; }
+#railmore{ display:flex; flex-direction:column; gap:4px; }
+#btnToolMore{ display:none; }        /* 広い画面では 8 個すべてをレールに出すので使わない */
+/* 「その他」を開いている間だけ覆い（#scrim）より前に出す。でないとレールの中身を押せない */
+#tools.raise{ z-index:15; }
+
+/* ── ズーム（広い画面では右下に浮かせる） ───────── */
+#zoom{
+  position:absolute; z-index:11;
+  right:calc(16px + env(safe-area-inset-right));
+  bottom:calc(var(--status-h) + env(safe-area-inset-bottom) + 16px);
+  display:flex; gap:2px; padding:4px;
+  background:var(--ink-800); border:1px solid #000; border-radius:10px;
+  box-shadow:0 6px 20px rgba(0,0,0,.35);
+}
+#zoom button{ min-width:40px; }
+
+/* メニュー・ツールの「その他」を開いている間の覆い。これが無いと、閉じるつもりで触った場所が
+   キャンバスに届いて図形ができてしまう。出す条件は syncScrim に一本化してある */
+#scrim{ position:fixed; inset:0; z-index:13; background:transparent; }
+#scrim[hidden]{ display:none; }
+
+/* 開閉ボタンには aria-pressed を付けないので、押下状態の見た目は aria-expanded から作る */
+#btnMore[aria-expanded="true"]{ background:var(--accent); color:#fff; }
+
+/* ── メニュー（広い画面はポップオーバー、狭い画面は下から出るシート） ── */
+#sheet{
+  position:absolute; z-index:14;
+  top:calc(var(--bar-h) + env(safe-area-inset-top) + 6px);
+  right:calc(8px + env(safe-area-inset-right));
+  width:min(340px, calc(100% - 16px));
+  max-height:calc(100% - var(--bar-h) - var(--status-h) - 28px);
+  /* #wrap の外なので touch-action:none の打ち消しは要らない。
+     pinch-zoom を含まない値を書くと、この面だけブラウザの拡大ができなくなる */
+  overflow-y:auto;
+  background:var(--ink-800); color:var(--chrome-fg);
+  border:1px solid #000; border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.45);
+  padding:4px 8px 8px;
+}
+#sheet[hidden]{ display:none; }
+#sheet .shead{ display:none; }       /* 見出しはシートとして出す狭い画面だけで使う */
+#sheet .srow{ display:flex; align-items:center; gap:6px; flex-wrap:wrap; padding:7px 2px; }
+#sheet .srow + .srow{ border-top:1px solid var(--rule); }
+#sheet .stag{ font-size:11.5px; opacity:.6; min-width:64px; }
+#sheet button{ background:var(--ink-700); }
+
 /* 書式パネルはキャンバス上に浮かせる。上下バーの高さを変えると、
    ドラッグ中にキャンバスの原点が動いて図形がずれるため。 */
 #props{
-  position:absolute; left:50%; bottom:16px; transform:translateX(-50%);
-  z-index:5; max-width:calc(100% - 24px);
-  background:var(--ink-800); border:1px solid #000; border-radius:10px;
-  padding:6px 10px; box-shadow:0 6px 20px rgba(0,0,0,.35);
+  position:absolute; left:50%; bottom:calc(var(--dock-h) + 16px); transform:translateX(-50%);
+  z-index:5; max-width:calc(100% - 470px);   /* 左のレールと右下のズームを避ける */
+  background:var(--ink-800); border:1px solid #000; border-radius:12px;
+  padding:5px 8px; gap:6px; box-shadow:0 6px 20px rgba(0,0,0,.35);
+  overflow-x:auto; overflow-y:hidden;
+  touch-action:pan-x;                        /* #wrap の touch-action:none を打ち消す */
+  scrollbar-width:thin;
 }
 #props[hidden]{ display:none; }
+#props .group{ background:rgba(0,0,0,.22); }
+#props > *{ flex:0 0 auto; }   /* 縮まずにあふれさせ、横スクロールで見せる */
 
 #help{
-  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:9;
-  width:min(560px, calc(100% - 24px)); max-height:calc(100% - 40px); overflow:auto;
+  position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:20;
+  width:min(560px, calc(100% - 24px)); max-height:calc(100% - 40px);
+  overflow:auto; touch-action:pan-y;         /* #wrap の touch-action:none を打ち消す */
   background:var(--ink-800); color:var(--chrome-fg);
   border:1px solid #000; border-radius:12px; box-shadow:0 10px 34px rgba(0,0,0,.45);
 }
 #help[hidden]{ display:none; }
 #help .hhead{
   display:flex; align-items:center; justify-content:space-between;
-  padding:10px 14px; background:var(--ink-700); font-weight:600;
+  padding:8px 14px; background:var(--ink-700); font-weight:600;
   position:sticky; top:0;
 }
 #help .hbody{ padding:6px 14px 14px; }
@@ -86,23 +238,22 @@ body{
 #help dd{ margin:0; font-size:12.5px; }
 
 #ctxmenu{
-  position:absolute; z-index:8; min-width:132px; padding:4px;
+  position:absolute; z-index:16; min-width:132px; padding:4px;
   background:var(--ink-800); color:var(--chrome-fg);
   border:1px solid #000; border-radius:8px;
   box-shadow:0 8px 24px rgba(0,0,0,.4);
   display:flex; flex-direction:column; gap:1px;
+  touch-action:pan-y;
 }
 #ctxmenu[hidden]{ display:none; }
 #ctxmenu .chead{
   font-size:10.5px; opacity:.5; padding:4px 8px 5px; letter-spacing:.06em;
 }
-#ctxmenu button{
-  text-align:left; padding:6px 10px; font-size:12.5px; border-radius:5px;
-}
-#ctxmenu button:hover{ background:var(--accent); color:#fff; }
+#ctxmenu button{ justify-content:flex-start; padding:0 10px; font-size:12.5px; border-radius:5px; }
+@media (hover:hover){ #ctxmenu button:hover{ background:var(--accent); color:#fff; } }
 
 #layers{
-  position:absolute; right:14px; top:14px; z-index:6; width:230px;
+  position:absolute; right:14px; top:14px; z-index:7; width:230px;
   background:var(--ink-800); color:var(--chrome-fg); font-size:12.5px;
   border:1px solid #000; border-radius:10px; overflow:hidden;
   box-shadow:0 6px 20px rgba(0,0,0,.35);
@@ -110,25 +261,25 @@ body{
 #layers[hidden]{ display:none; }
 #layers .lhead{
   display:flex; align-items:center; justify-content:space-between;
-  padding:7px 10px; background:var(--ink-700); font-weight:600; letter-spacing:.04em;
+  padding:5px 10px; background:var(--ink-700); font-weight:600; letter-spacing:.04em;
 }
-#layers .lhead button{ padding:2px 8px; font-size:15px; line-height:1; }
-#layerList{ max-height:280px; overflow:auto; }
+#layers .lhead button{ padding:0 8px; font-size:15px; }
+#layerList{ max-height:280px; overflow:auto; touch-action:pan-y; }
 #layers .lrow{
   display:flex; align-items:center; gap:6px; padding:5px 8px;
-  border-top:1px solid #33403e; cursor:pointer;
+  border-top:1px solid var(--rule); cursor:pointer;
 }
 #layers .lrow.on{ background:var(--accent); }
 #layers .lrow.on .lcnt{ opacity:.9; }
 #layers .lnm{ flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 #layers .lcnt{ font-family:var(--mono); font-size:10.5px; opacity:.55; }
 #layers .ltog{
-  font-size:10.5px; padding:2px 6px; border-radius:4px;
+  font-size:10.5px; padding:0 6px; min-height:26px; border-radius:4px;
   background:rgba(255,255,255,.08); white-space:nowrap;
 }
 #layers .ltog[aria-pressed="false"]{ opacity:.45; }
 #layers .lfoot{ display:flex; gap:2px; padding:6px; background:var(--ink-700); flex-wrap:wrap; }
-#layers .lfoot button{ font-size:11.5px; padding:5px 7px; background:rgba(255,255,255,.07); }
+#layers .lfoot button{ font-size:11.5px; padding:0 7px; background:rgba(255,255,255,.07); }
 #layers input.rename{
   flex:1; min-width:0; font-family:var(--ui); font-size:12.5px;
   color:var(--chrome-fg); background:var(--ink-900);
@@ -139,58 +290,12 @@ body{
   position:absolute; left:50%; top:14px; transform:translateX(-50%); z-index:6;
   display:flex; align-items:center; gap:8px;
   background:var(--ink-800); color:var(--chrome-fg); font-size:12.5px;
-  border:1px solid #000; border-radius:10px; padding:7px 10px;
+  border:1px solid #000; border-radius:10px; padding:6px 10px;
   box-shadow:0 6px 20px rgba(0,0,0,.35);
 }
 #restore[hidden]{ display:none; }
 #restore button{ background:var(--ink-700); }
 #restore #btnRestore{ background:var(--accent); }
-.brand{ display:flex; align-items:center; gap:8px; white-space:nowrap; }
-.brand .mark{ width:22px; height:22px; flex:0 0 auto; display:block; }
-.brandtx{ font-size:13px; font-weight:650; letter-spacing:.14em; opacity:.75; }
-.group{ display:flex; align-items:center; gap:2px; background:var(--ink-700); padding:2px; border-radius:7px; }
-#props .group{ background:rgba(0,0,0,.22); }
-.group[hidden]{ display:none; }
-.sep{ width:1px; height:22px; background:#3a4a47; }
-.tag{ font-size:11px; opacity:.6; padding:0 6px 0 2px; white-space:nowrap; }
-
-button{
-  font-family:var(--ui); font-size:12.5px; color:var(--chrome-fg);
-  background:transparent; border:0; border-radius:5px;
-  padding:6px 10px; cursor:pointer; line-height:1.2; white-space:nowrap;
-}
-button:hover{ background:#3a4a47; }
-button:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:1px; }
-button[aria-pressed="true"]{ background:var(--accent); color:#fff; }
-button[disabled]{ opacity:.35; cursor:default; }
-button[disabled]:hover{ background:transparent; }
-button .k{ opacity:.55; font-family:var(--mono); font-size:10.5px; margin-left:5px; }
-
-/* 背景を transparent にしておくと、開いた一覧の地色が環境任せになり、
-   明るい地に明るい文字が重なって読めなくなることがある。
-   地色と文字色を両方とも明示しておく。 */
-select{
-  font-family:var(--ui); font-size:12.5px;
-  color:var(--chrome-fg);
-  background-color:var(--ink-900);
-  border:1px solid #465653; border-radius:5px;
-  padding:5px 6px; cursor:pointer;
-  color-scheme:dark;
-}
-select:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:1px; }
-select option,
-select optgroup{
-  background-color:var(--ink-900);
-  color:var(--chrome-fg);
-}
-
-.sw{
-  width:22px; height:22px; padding:0; border-radius:5px;
-  box-shadow:inset 0 0 0 1px rgba(255,255,255,.22);
-}
-.sw:hover{ background:transparent; box-shadow:inset 0 0 0 1px rgba(255,255,255,.6); }
-.sw[aria-pressed="true"]{ box-shadow:inset 0 0 0 2px #fff, 0 0 0 2px var(--accent); }
-.sw.none{ background-image:linear-gradient(135deg,transparent 44%,var(--warn) 44%,var(--warn) 56%,transparent 56%); }
 
 /* ── キャンバス ───────────────────────────── */
 #wrap{
@@ -214,61 +319,138 @@ select optgroup{
 
 /* ── ステータスバー ──────────────────────── */
 #status{
-  display:flex; align-items:center; background:var(--ink-800); color:var(--chrome-fg);
-  font-family:var(--mono); font-size:11px; border-top:1px solid #000; min-height:26px;
+  display:flex; align-items:center; flex:0 0 auto;
+  background:var(--ink-800); color:var(--chrome-fg);
+  font-family:var(--mono); font-size:11px; border-top:1px solid #000;
+  height:calc(var(--status-h) + env(safe-area-inset-bottom));
+  padding:0 calc(4px + env(safe-area-inset-right)) env(safe-area-inset-bottom) calc(4px + env(safe-area-inset-left));
+  overflow-x:auto; overflow-y:hidden;   /* #wrap の外なので touch-action は書かない（拡大が死ぬ） */
+  scrollbar-width:none; -webkit-overflow-scrolling:touch;
 }
-#status .cell{ padding:5px 12px; border-right:1px solid #33403e; opacity:.8; white-space:nowrap; }
+#status::-webkit-scrollbar{ display:none; }
+#status .cell{ flex:0 0 auto; padding:4px 10px; border-right:1px solid var(--rule); opacity:.8; white-space:nowrap; }
 #status .cell:last-child{ border-right:0; }
-#status .cell.hint{ opacity:.5; overflow:hidden; text-overflow:ellipsis; }
+#status .cell.hint{ opacity:.55; overflow:hidden; text-overflow:ellipsis; }
+.hintShort{ display:none; }          /* 狭い画面では短いほうに差し替える */
 .dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:1px; }
 .dot.on{ background:var(--accent); } .dot.off{ background:var(--warn); }
-.dot.dirty{ background:var(--warn); } .dot.clean{ background:#4a5b58; }
+.dot.dirty{ background:var(--warn); } .dot.clean{ background:var(--muted); }
 
+/* button の背景色に transition を掛けているので、この打ち消しは効いている */
 @media (prefers-reduced-motion: reduce){ *{ transition:none !important; } }
 
-/* ── 画面が狭いとき（スマホ・タブレット縦） ──
-   上下バーは折り返さず横スクロールにして、キャンバスの高さを確保する。
-   指で押す部品は 40px 前後の高さを確保する。 */
-@media (max-width:760px){
-  .brandtx{ display:none; }          /* 狭い画面では文字だけ隠し、アイコンは残す */
-  #status .cell.hint{ display:none; }
-  #toolbar .tag{ display:none; }
-  button .k{ display:none; }
+@media (max-width:1000px){
+  .brandtx{ display:none; }          /* 幅が足りないときは文字だけ隠し、アイコンは残す */
+}
 
-  .bar{
-    flex-wrap:nowrap; overflow-x:auto; overflow-y:hidden;
-    gap:8px; padding:6px 8px;
-    scrollbar-width:none; -webkit-overflow-scrolling:touch;
-  }
-  .bar::-webkit-scrollbar{ display:none; }
-  .sep{ display:none; }
-  .group{ flex:0 0 auto; }
-  button{ padding:9px 12px; font-size:13px; }
-  select{ padding:8px 8px; font-size:13px; }
-  .sw{ width:30px; height:30px; }
-
+/* ── 中間の幅（タブレット縦・小さめのウィンドウ） ──
+   書式パネルは中央寄せなので、左のレールと右下のズームを避けるには
+   左右それぞれに同じ幅を空ける必要があり、この幅では中身が潰れる。
+   下端でズームと横に並べるのをやめ、パネルをズームの上へ逃がす。 */
+@media (min-width:761px) and (max-width:1000px){
   #props{
-    left:8px; right:8px; bottom:10px; transform:none; max-width:none;
-    overflow-x:auto; flex-wrap:nowrap; scrollbar-width:none;
+    /* #props は #wrap の子なので、bottom の基準はステータスバーを含まない #wrap の下端。
+       #zoom は #app の子で基準が違うため、そちらの式をそのまま持ってきてはいけない */
+    bottom:calc(var(--dock-h) + 72px);
+    /* 中央寄せなので、レールの右端 78px を左右とも空ける */
+    max-width:calc(100% - 180px);
   }
-  #props::-webkit-scrollbar{ display:none; }
-  #layers{ left:8px; right:8px; top:auto; bottom:10px; width:auto; }
-  #layerList{ max-height:32vh; }
-  #layers .ltog{ padding:7px 9px; }
-  #layers .lrow{ padding:8px; }
-  #layers .lfoot button{ font-size:12.5px; padding:8px 9px; }
-  #ctxmenu{ min-width:150px; }
-  #ctxmenu button{ padding:12px 14px; font-size:14px; }
+}
+
+/* ── 画面が狭いとき（小型スマホ・タブレット縦） ──
+   ツールは下部ドックへ移し、上部バーはアプリ操作だけに絞る。
+   押す部品は 44px 以上を確保する。 */
+@media (max-width:760px){
+  :root{ --bar-h:54px; --status-h:30px; --dock-h:60px; --tap:44px; }
+
+  #toolbar{ gap:6px; }
+  #toolbar .btx{ display:none; }      /* 上部バーはアイコンだけにして 360px に収める */
+  #toolbar button .k{ display:none; }
+  #toolbar button{ min-width:44px; padding:0 6px; }
+  .sep{ display:none; }
+
+  /* ツールレールを下部ドックにする。あふれる 3 つは「その他」の中へ畳む */
+  #tools{
+    left:50%; right:auto; transform:translateX(-50%);
+    top:auto; bottom:calc(var(--status-h) + env(safe-area-inset-bottom) + 8px);
+    flex-direction:row; gap:2px; padding:4px; max-width:calc(100% - 12px);
+    max-height:none; overflow:visible;   /* 「その他」の面がはみ出せるように */
+  }
+  #tools button{ width:46px; min-height:48px; padding:3px 2px; font-size:10px; }
+  #btnToolMore{ display:inline-flex; }
+  #railmore{
+    position:absolute; right:0; bottom:calc(100% + 8px);
+    display:none; flex-direction:row; gap:2px; padding:4px;
+    background:var(--ink-800); border:1px solid #000; border-radius:12px;
+    box-shadow:0 6px 20px rgba(0,0,0,.35);
+  }
+  #railmore.open{ display:flex; }
+
+  /* ズームは右上に縦置き。下端は書式パネルとドックで埋まるため */
+  #zoom{
+    flex-direction:column; bottom:auto;
+    top:calc(var(--bar-h) + env(safe-area-inset-top) + 8px);
+    right:calc(8px + env(safe-area-inset-right));
+  }
+  #zoom button{ min-width:44px; padding:0 4px; font-size:11px; }
+
+  #scrim{ background:rgba(0,0,0,.35); }
+
+  /* メニューは下から出るシートにする */
+  #sheet{
+    position:fixed; left:0; right:0; bottom:0; top:auto; width:auto;
+    max-height:72vh; border-radius:16px 16px 0 0;
+    padding:0 10px calc(10px + env(safe-area-inset-bottom));
+    box-shadow:0 -10px 34px rgba(0,0,0,.5);
+  }
+  #sheet .shead{
+    display:flex; align-items:center; justify-content:space-between;
+    position:sticky; top:0; z-index:1; background:var(--ink-800);
+    padding:10px 2px; font-weight:600;
+  }
+  #sheet .srow{ padding:8px 2px; }
+  #sheet .stag{ min-width:100%; }    /* ラベルを上、部品を下に折り返す */
+
+  /* 書式パネルはドックの上に置く。重なると両方とも押せなくなるため */
+  #props{ left:8px; right:8px; transform:none; max-width:none; padding:5px 6px; }
+  .sw{ width:44px; height:44px; }
+
+  /* レイヤーパネルは上寄せ。下は書式パネルとドックが使う。
+     右端はズームの縦列を避ける */
+  #layers{ left:8px; right:66px; top:8px; bottom:auto; width:auto; }
+  #layerList{ max-height:34vh; }
+  #layers .lrow{ padding:6px 8px; }
+  #layers .ltog{ min-height:36px; padding:0 10px; font-size:11.5px; }
+  #layers .lfoot button{ font-size:12.5px; padding:0 9px; }
+  #restore{ left:8px; right:66px; transform:none; }
+  /* レイヤーパネルと同じ帯に居ると、復元ボタンが .lhead の下に潜って押せなくなる。
+     自動保存からの唯一の復旧経路なので、パネルを開いている間は下へ逃がす。
+     #restore は #wrap の子なので、bottom の基準はステータスバーを含まない #wrap の下端。
+     ドック（--dock-h）と、その上に載る書式パネル 1 行ぶんを空ける */
+  #layers:not([hidden]) ~ #restore{
+    top:auto; bottom:calc(var(--dock-h) + 88px); left:8px; right:8px;
+  }
+
+  #ctxmenu{ min-width:160px; }
+  #ctxmenu button{ font-size:14px; padding:0 14px; }
   #help dl{ grid-template-columns:1fr; gap:0; }
   #help dt{ margin-top:10px; }
-  #status .cell{ padding:6px 8px; }
-  #restore{ left:8px; right:8px; transform:none; }
+
+  /* 環境と手がかりを先に出す。残りは横スクロールで読む */
+  #status .cell{ padding:4px 8px; }
+  #stEnv{ order:1; }
+  #stHint{ order:2; max-width:62vw; }
+  #stZoom{ order:3; } #stCount{ order:4; } #stFile{ order:5; } #stBackup{ order:6; }
+  .hintFull{ display:none; }
+  .hintShort{ display:inline; }
 }
 </style>
 </head>
 <body>
 <div id="app">
 
+  <!-- 上部バーはアプリ全体の操作だけを置く。描画ツールは #tools（レール／ドック）へ移した。
+       高さは CSS で固定してある（可変にすると #wrap の高さが動く）。 -->
   <div class="bar" id="toolbar">
     <span class="brand">
       <svg class="mark" viewBox="0 0 112 112" aria-hidden="true">
@@ -282,35 +464,53 @@ select optgroup{
       <span class="brandtx">WHITEBOARD</span>
     </span>
 
-    <div class="group" role="group" aria-label="ツール">
-      <button data-tool="select" aria-pressed="true">選択<span class="k">V</span></button>
-      <button data-tool="text"   aria-pressed="false">文字<span class="k">T</span></button>
-      <button data-tool="note"   aria-pressed="false">付箋<span class="k">N</span></button>
-      <button data-tool="rect"   aria-pressed="false">枠<span class="k">R</span></button>
-      <button data-tool="line"   aria-pressed="false">直線<span class="k">L</span></button>
-      <button data-tool="arrow"  aria-pressed="false">矢印<span class="k">A</span></button>
-      <button data-tool="pen"    aria-pressed="false">手書き<span class="k">P</span></button>
-      <button data-tool="frame"  aria-pressed="false">フレーム<span class="k">F</span></button>
+    <!-- 元に戻す・やり直すは狭い画面でも常に見える位置に置く -->
+    <div class="group" role="group" aria-label="履歴">
+      <button id="btnUndo" disabled aria-label="元に戻す" title="元に戻す（Ctrl+Z）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 7 4 12l5 5M4 12h9a5 5 0 0 1 0 10h-3"/></svg>
+        <span class="btx">元に戻す</span><span class="k">^Z</span>
+      </button>
+      <button id="btnRedo" disabled aria-label="やり直す" title="やり直す（Ctrl+Y）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m15 7 5 5-5 5M20 12h-9a5 5 0 0 0 0 10h3"/></svg>
+        <span class="btx">やり直す</span><span class="k">^Y</span>
+      </button>
     </div>
 
     <div class="sep"></div>
-    <div class="group">
-      <button id="btnUndo" disabled>元に戻す<span class="k">^Z</span></button>
-      <button id="btnRedo" disabled>やり直す<span class="k">^Y</span></button>
+    <div class="group" role="group" aria-label="ファイル">
+      <button id="btnOpen" aria-label="開く" title="開く（Ctrl+O）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M3 19V6h6l2 2h10v11z"/></svg>
+        <span class="btx">開く</span><span class="k">^O</span>
+      </button>
+      <button id="btnSave" aria-label="保存" title="保存（Ctrl+S）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h12l4 4v12H4zM8 4v5h7M8 14h8v6H8z"/></svg>
+        <span class="btx">保存</span><span class="k">^S</span>
+      </button>
     </div>
 
-    <div class="sep"></div>
-    <div class="group">
-      <button id="btnZoomOut">−</button>
-      <button id="btnZoomReset">100%</button>
-      <button id="btnZoomIn">＋</button>
-      <button id="btnFit">全体を表示</button>
-    </div>
+    <div class="spacer"></div>
 
-    <div class="sep"></div>
     <div class="group">
-      <span class="tag">グリッド</span>
-      <select id="selGrid" title="グリッドの間隔">
+      <button id="btnLayers" aria-pressed="false" aria-label="レイヤー" title="レイヤーパネルの開閉">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3 9 5-9 5-9-5zM3 13l9 5 9-5"/></svg>
+        <span class="btx">レイヤー</span>
+      </button>
+      <button id="btnMore" aria-expanded="false" aria-controls="sheet" aria-label="メニュー" title="メニュー（書き出し・テーマ・グリッド・ヘルプ）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/></svg>
+        <span class="btx">メニュー</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 使う頻度の低い操作はここへ畳む。広い画面ではポップオーバー、狭い画面では下から出るシート。
+       #wrap の外側にあるので、触ってもキャンバスには届かない。 -->
+  <div id="scrim" hidden></div>
+  <div id="sheet" hidden role="dialog" aria-modal="true" aria-labelledby="sheetTitle">
+    <div class="shead"><span id="sheetTitle">メニュー</span><button id="btnSheetClose">閉じる</button></div>
+
+    <div class="srow">
+      <span class="stag">グリッド</span>
+      <select id="selGrid" aria-label="グリッドの間隔" title="グリッドの間隔">
         <option value="0">なし</option>
         <option value="8">8</option>
         <option value="16">16</option>
@@ -322,14 +522,9 @@ select optgroup{
       <button id="btnGuide" aria-pressed="true" title="他の図形との位置ぞろえ・等間隔をドラッグ中に案内する">ガイド</button>
     </div>
 
-    <div class="group">
-      <button id="btnLayers" aria-pressed="false">レイヤー</button>
-      <button id="btnHelp" aria-pressed="false" title="キーボード操作の一覧（?）">?</button>
-    </div>
-
-    <div class="group">
-      <span class="tag">テーマ</span>
-      <select id="selTheme" title="配色テーマ（保存ファイルに記録されます）">
+    <div class="srow">
+      <span class="stag">テーマ</span>
+      <select id="selTheme" aria-label="配色テーマ" title="配色テーマ（保存ファイルに記録されます）">
         <option value="forest" selected>深緑</option>
         <option value="dark">ダーク</option>
         <option value="blueprint">製図</option>
@@ -337,22 +532,25 @@ select optgroup{
       </select>
     </div>
 
-    <div class="sep"></div>
-    <div class="group">
-      <button id="btnOpen">開く<span class="k">^O</span></button>
-      <button id="btnSave">保存<span class="k">^S</span></button>
-      <button id="btnSaveAs">名前を付けて保存</button>
-    </div>
-
-    <div class="group">
-      <span class="tag">書き出し</span>
-      <select id="selScope" title="書き出す範囲">
-        <option value="all" selected>全体</option>
-        <option value="sel">選択範囲</option>
-        <option value="frame">フレーム</option>
+    <div class="srow">
+      <span class="stag">書き出し</span>
+      <select id="selScope" aria-label="書き出す範囲" title="書き出す範囲">
+        <option value="all" selected>全体を書き出し</option>
+        <option value="sel">選択範囲を書き出し</option>
+        <option value="frame">フレームを書き出し</option>
       </select>
       <button id="btnExportSvg">SVG</button>
       <button id="btnExportPng">PNG</button>
+    </div>
+
+    <div class="srow">
+      <span class="stag">ファイル</span>
+      <button id="btnSaveAs">名前を付けて保存</button>
+    </div>
+
+    <div class="srow">
+      <span class="stag">ヘルプ</span>
+      <button id="btnHelp" aria-pressed="false" title="キーボード操作の一覧（?）">キーボード操作の一覧</button>
     </div>
   </div>
 
@@ -366,8 +564,8 @@ select optgroup{
     </svg>
     <textarea id="editor" spellcheck="false"></textarea>
 
-    <div id="help" hidden>
-      <div class="hhead"><span>キーボードだけで操作する</span><button id="btnHelpClose">閉じる</button></div>
+    <div id="help" hidden role="dialog" aria-modal="true" aria-labelledby="helpTitle">
+      <div class="hhead"><span id="helpTitle">キーボードだけで操作する</span><button id="btnHelpClose">閉じる</button></div>
       <div class="hbody">
         <dl>
           <dt>V T N R L A P F</dt><dd>選択／文字／付箋／枠／直線／矢印／手書き／フレーム</dd>
@@ -384,7 +582,7 @@ select optgroup{
           <dt>Ctrl+[ ]</dt><dd>背面へ／前面へ（Shift 併用で最背面・最前面）</dd>
           <dt>Ctrl+Z / Ctrl+Y</dt><dd>元に戻す／やり直す</dd>
           <dt>Ctrl+S / Ctrl+O</dt><dd>保存／開く</dd>
-          <dt>F6</dt><dd>上のツールバーへ移動（そこからは Tab で送る）</dd>
+          <dt>F6</dt><dd>上部バーへ移動（そこからは Tab で送る）</dd>
           <dt>Escape</dt><dd>解除・メニューを閉じる・キャンバスへ戻る</dd>
           <dt>?</dt><dd>この一覧</dd>
         </dl>
@@ -417,10 +615,11 @@ select optgroup{
       <button id="btnRestore">復元する</button>
       <button id="btnDismiss">閉じる</button>
     </div>
+
   <div class="bar" id="props" hidden>
     <div class="group" id="grpSize">
       <span class="tag">文字サイズ</span>
-      <select id="selSize">
+      <select id="selSize" aria-label="文字サイズ">
         <option value="14">14</option><option value="18" selected>18</option>
         <option value="24">24</option><option value="32">32</option><option value="48">48</option>
       </select>
@@ -431,7 +630,7 @@ select optgroup{
 
     <div class="group" id="grpWidth">
       <span class="tag">線の太さ</span>
-      <select id="selWidth">
+      <select id="selWidth" aria-label="線の太さ">
         <option value="1.5">細</option><option value="2.5" selected>中</option>
         <option value="4">太</option><option value="7">極太</option>
       </select>
@@ -439,7 +638,7 @@ select optgroup{
 
     <div class="group" id="grpArrow">
       <span class="tag">矢じり</span>
-      <select id="selArrow">
+      <select id="selArrow" aria-label="矢じりの向き">
         <option value="none">なし</option>
         <option value="end" selected>先端</option>
         <option value="both">両端</option>
@@ -476,13 +675,70 @@ select optgroup{
   </div>
   </div>
 
+  <!-- 描画ツール。広い画面では左端の縦レール、狭い画面では下部ドックになる。
+       #wrap の外側に置いてあるので、押してもキャンバスには届かない。 -->
+  <div id="tools" role="group" aria-label="描画ツール">
+    <button data-tool="select" aria-pressed="true" title="選択（V）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3 19 10l-6.4 2L10 19z"/></svg>
+      <span class="tl">選択</span>
+    </button>
+    <button data-tool="text" aria-pressed="false" title="文字（T）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg>
+      <span class="tl">文字</span>
+    </button>
+    <button data-tool="note" aria-pressed="false" title="付箋（N）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h14v10l-5 6H5zM19 14h-5v6"/></svg>
+      <span class="tl">付箋</span>
+    </button>
+    <button data-tool="arrow" aria-pressed="false" title="矢印（A）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5M12 5h7v7"/></svg>
+      <span class="tl">矢印</span>
+    </button>
+    <button data-tool="pen" aria-pressed="false" title="手書き（P）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="m5 19 4-1L20 7l-3-3L6 15z"/></svg>
+      <span class="tl">手書き</span>
+    </button>
+    <button id="btnToolMore" aria-expanded="false" aria-controls="railmore" aria-label="その他のツール" title="その他のツール（枠・直線・フレーム）">
+      <svg class="ic dots" viewBox="0 0 24 24" aria-hidden="true"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></svg>
+      <span class="tl">その他</span>
+    </button>
+    <!-- 広い画面ではレールにそのまま並び、狭い画面では「その他」で開く小さな面になる -->
+    <div id="railmore">
+      <button data-tool="rect" aria-pressed="false" title="枠（R）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4z"/></svg>
+        <span class="tl">枠</span>
+      </button>
+      <button data-tool="line" aria-pressed="false" title="直線（L）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 19 19 5"/></svg>
+        <span class="tl">直線</span>
+      </button>
+      <button data-tool="frame" aria-pressed="false" title="フレーム（F）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM4 9h16"/></svg>
+        <span class="tl">フレーム</span>
+      </button>
+    </div>
+  </div>
+
+  <div id="zoom" role="group" aria-label="表示倍率">
+    <button id="btnZoomOut" aria-label="縮小" title="縮小（−）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14"/></svg>
+    </button>
+    <button id="btnZoomReset" title="100% に戻す（0）">100%</button>
+    <button id="btnZoomIn" aria-label="拡大" title="拡大（+）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="btnFit" aria-label="全体を表示" title="全体を表示（9）">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+    </button>
+  </div>
+
   <div id="status">
     <div class="cell" id="stZoom">100%</div>
     <div class="cell" id="stCount">0 個</div>
     <div class="cell" id="stFile"></div>
-    <div class="cell" id="stEnv"></div>
+    <div class="cell" id="stEnv" role="status" aria-live="polite"></div>
     <div class="cell" id="stBackup"></div>
-    <div class="cell hint" id="stHint">ダブルクリックで文字入力／Space+ドラッグで移動／Ctrl+ホイールで拡大縮小／? でキーボード操作一覧</div>
+    <div class="cell hint" id="stHint"><span class="hintFull">ダブルクリックで文字入力／Space+ドラッグで移動／Ctrl+ホイールで拡大縮小／? でキーボード操作一覧</span><span class="hintShort">長押しで挿入／2本指で移動・拡大</span></div>
   </div>
 
 </div>
@@ -518,6 +774,7 @@ var THEMES = {
   forest: {
     name:"深緑",
     c900:"#151d1c", c800:"#1d2827", c700:"#2a3836", cfg:"#e6ecea",
+    hover:"#3a4a47", edge:"#465653", rule:"#33403e", muted:"#4a5b58",
     paper:"#f6f7f5", grid:"#c9d2ce", accent:"#1f6f63", accentSoft:"#e2efeb", guide:"#c2306b",
     frameStroke:"#8a9a96", frameLabel:"#6b7a77", shapeStroke:"rgba(0,0,0,.10)", handleFill:"#ffffff",
     inks: ["#151d1c", "#1f6f63", "#1f4e8c", "#a2560f", "#a3204a", "#5b6a68"],
@@ -526,6 +783,7 @@ var THEMES = {
   dark: {
     name:"ダーク",
     c900:"#111214", c800:"#17181b", c700:"#232529", cfg:"#e8ecef",
+    hover:"#2f3237", edge:"#3a3e44", rule:"#2b2e33", muted:"#4b5057",
     paper:"#1e2124", grid:"#33383d", accent:"#6fb3a5", accentSoft:"#2b4a44", guide:"#ff6b9d",
     frameStroke:"#5d666c", frameLabel:"#8b959b", shapeStroke:"rgba(255,255,255,.14)", handleFill:"#1e2124",
     inks: ["#e8ecef", "#6fb3a5", "#7fa9e8", "#e0a15c", "#e8809f", "#9aa5ab"],
@@ -534,6 +792,7 @@ var THEMES = {
   blueprint: {
     name:"製図",
     c900:"#0a1526", c800:"#0e1c33", c700:"#16294a", cfg:"#dce9ff",
+    hover:"#1f3b68", edge:"#2c4d80", rule:"#1c355c", muted:"#47638f",
     paper:"#12294d", grid:"#2a4a7a", accent:"#7fb3ff", accentSoft:"#1e3c68", guide:"#ffcb47",
     frameStroke:"#5b82bd", frameLabel:"#8fb0dd", shapeStroke:"rgba(255,255,255,.18)", handleFill:"#12294d",
     inks: ["#eaf2ff", "#7fb3ff", "#9ee6ff", "#ffcb47", "#ff9db0", "#a8bcd8"],
@@ -542,6 +801,7 @@ var THEMES = {
   washi: {
     name:"和紙",
     c900:"#221e19", c800:"#2b2621", c700:"#3a332b", cfg:"#efe7d8",
+    hover:"#4a4238", edge:"#5a5043", rule:"#453d33", muted:"#6a6154",
     paper:"#f4ede0", grid:"#ddd2bd", accent:"#9a6b3f", accentSoft:"#eadfc8", guide:"#b5482f",
     frameStroke:"#a89880", frameLabel:"#8a7a63", shapeStroke:"rgba(0,0,0,.12)", handleFill:"#fdfaf3",
     inks: ["#2f2a24", "#6b5334", "#3d5468", "#a35a1e", "#8d2f3f", "#7a7266"],
@@ -881,7 +1141,12 @@ function updateLabel(g, sh) {
   var lb = g.querySelector(".lb");
   if (!lb) return;
   var txt = sh.label || "";
-  if (!txt || (editing && editing.id === sh.id && editField === "label")) { lb.style.display = "none"; return; }
+  if (!txt || (editing && editing.id === sh.id && editField === "label")) {
+    // 前に入力していた tspan を残さない。残すと書き出しで消したはずの文字が復活する
+    while (lb.firstChild) lb.removeChild(lb.firstChild);
+    lb.style.display = "none";
+    return;
+  }
   lb.style.display = "";
   var size = sh.labelSize || 18;
   var b = bbox(sh);
@@ -1420,6 +1685,13 @@ function applyThemeById(id, remap) {
   r.setProperty("--grid", next.grid);
   r.setProperty("--accent", next.accent);
   r.setProperty("--accent-soft", next.accentSoft);
+  r.setProperty("--hover", next.hover);
+  r.setProperty("--edge", next.edge);
+  r.setProperty("--rule", next.rule);
+  r.setProperty("--muted", next.muted);
+  // ブラウザの枠（Android Chrome のアドレスバーなど）の色もテーマに合わせる
+  var tc = document.querySelector('meta[name="theme-color"]');
+  if (tc) tc.setAttribute("content", next.c800);
 
   rebuildSwatches();
   document.getElementById("selTheme").value = id;
@@ -2016,6 +2288,8 @@ function abortDrag() {
   if (!drag) return;
   if (drag.snap) restoreState(drag.snap);
   drag = null;
+  liveStroke = null;
+  els.wrap.classList.remove("panning");
   clearGuides(); clearAnchors();
   render();
 }
@@ -2109,7 +2383,12 @@ function hitTest(wx, wy) {
   return null;
 }
 
-/** 書式パネル・レイヤーパネル・復元バー・編集欄は #wrap の子なので、キャンバス操作と区別する */
+/*
+ * 書式パネル・レイヤーパネル・復元バー・編集欄は #wrap の子なので、キャンバス操作と区別する。
+ * 一方、ツールレール（#tools）・ズーム（#zoom）・メニュー（#sheet）は #wrap の外（#app の子）に
+ * 置いてある。#wrap の子ではないためイベントがキャンバスまで伝わらず、ここへの登録も
+ * stopOverlayEvents への登録も要らない。#wrap の内側へ移すときは、両方に足すこと。
+ */
 function onOverlay(e) {
   return !!(e.target && e.target.closest &&
             e.target.closest("#props, #restore, #editor, #layers, #ctxmenu, #help"));
@@ -2536,6 +2815,8 @@ els.wrap.addEventListener("pointerup", function (e) {
   cancelLongPress();
   delete pts[e.pointerId];
   if (pinchLock) {
+    // ピンチへ移る時点で startPinch が abortDrag するが、取りこぼしがあればここで確定する
+    finishDrag(e);
     if (!ptKeys().length) { pinchLock = false; pinch = null; }
     return;
   }
@@ -2545,12 +2826,22 @@ els.wrap.addEventListener("pointerup", function (e) {
     if (lastTap && now - lastTap.t < 320 &&
         Math.hypot(e.clientX - lastTap.x, e.clientY - lastTap.y) < 24) {
       lastTap = null;
-      if (drag && drag.mode === "marquee") { drag = null; drawSelection(); }
+      // 2 回目のタップで始まった操作（矢印・文字・矩形）は doc に書き込み済みなので、
+      // 巻き戻してからダブルクリックとして扱う。長さ 0 の線や空の文字が残らないようにする
+      abortDrag();
       handleDoubleClick(e.clientX, e.clientY);
       return;
     }
     lastTap = { t:now, x:e.clientX, y:e.clientY };
   }
+  finishDrag(e);
+});
+
+/**
+ * ドラッグの後始末。操作の種類ごとに結果を確定して履歴へ積む。
+ * pointerup のほか、ジェスチャを奪われた pointercancel からも呼ぶ。
+ */
+function finishDrag(e) {
   if (!drag) return;
   var mode = drag.mode;
   els.wrap.classList.remove("panning");
@@ -2618,7 +2909,7 @@ els.wrap.addEventListener("pointerup", function (e) {
   if (mode === "resize" && drag.changed) pushSnapshot(drag.snap);
   drag = null;
   render();
-});
+}
 
 // 右ドラッグを移動に使うため、キャンバス上ではブラウザのメニューを出さない
 els.wrap.addEventListener("contextmenu", function (e) {
@@ -2628,6 +2919,9 @@ els.wrap.addEventListener("contextmenu", function (e) {
 els.wrap.addEventListener("pointercancel", function (e) {
   cancelLongPress();
   delete pts[e.pointerId];
+  // 途中までの結果を確定させる。捨てると履歴に残らず取り返せないが、
+  // 確定なら Ctrl+Z で戻せて未保存の印も立つため、こちらのほうが害が小さい
+  finishDrag(e);
   if (pinchLock && !ptKeys().length) { pinchLock = false; pinch = null; }
 });
 
@@ -2710,26 +3004,83 @@ function serialize() {
     shapes:doc.shapes
   }, null, 1);
 }
-function load(json) {
+/** 数値として読めない値を既定値に置き換える。壊れたファイルで NaN が広がるのを防ぐ */
+function num(v, d) { v = Number(v); return isFinite(v) ? v : d; }
+
+var SHAPE_TYPES = { text:1, note:1, rect:1, image:1, stroke:1, line:1, frame:1 };
+/**
+ * 描画できる図形かどうか。
+ * 未知の種類は createNode が空の <g> を返して updateNode が落ち、
+ * 点のない stroke は bbox と pathD が落ちる。どちらも読み飛ばす。
+ */
+function drawableShape(sh) {
+  if (!sh || typeof sh !== "object" || SHAPE_TYPES[sh.type] !== 1) return false;   // toString など Object の持ち物を拾わない
+  if (sh.type === "stroke") {
+    if (!Array.isArray(sh.points) || !sh.points.length) return false;
+    for (var i = 0; i < sh.points.length; i++) {
+      if (!sh.points[i] || typeof sh.points[i] !== "object") return false;
+    }
+  }
+  return true;
+}
+/**
+ * JSON を読んでボードを差し替える。
+ * next は読み込みに成功したときだけ確定する保存先（{ handle, name }）。
+ * 省略すれば今の保存先とファイル名をそのまま保つ。
+ * 検証と組み立てをすべて済ませてから doc を差し替えるので、
+ * 途中で失敗しても編集中のボードは壊れない。
+ */
+function load(json, next) {
   var data = JSON.parse(json);
   if (!data || !Array.isArray(data.shapes)) throw new Error("図形データが見つかりません");
-  commitEdit();
-  doc.layers = (data.layers && data.layers.length) ? data.layers : [newLayer("レイヤー1")];
-  currentLayer = doc.layers[doc.layers.length - 1].id;
-  doc.shapes = data.shapes.map(migrate);
-  // レイヤーを持たない旧ファイルの図形は、いちばん下のレイヤーに入れる
-  for (var mi = 0; mi < doc.shapes.length; mi++) {
-    if (!layerById(doc.shapes[mi].layer)) doc.shapes[mi].layer = doc.layers[0].id;
+
+  var layers = [];
+  if (Array.isArray(data.layers)) {
+    for (var li = 0; li < data.layers.length; li++) {
+      var L = data.layers[li];
+      if (!L || typeof L !== "object" || !L.id) continue;
+      layers.push({ id:String(L.id), name:L.name == null ? "レイヤー" : String(L.name),
+                    visible:L.visible !== false, locked:!!L.locked });
+    }
   }
-  renderLayerList();
-  applyThemeById(THEMES[data.theme] ? data.theme : "forest", false);   // 記録がなければ既定テーマ
-  if (data.camera) cam = { x:data.camera.x, y:data.camera.y, s:data.camera.s || 1 };
+  if (!layers.length) layers = [newLayer("レイヤー1")];
+  var known = Object.create(null);
+  for (var ki = 0; ki < layers.length; ki++) known[layers[ki].id] = true;
+
+  var shapes = [], dropped = 0, seenId = Object.create(null);
+  for (var si = 0; si < data.shapes.length; si++) {
+    var sh = data.shapes[si];
+    if (!drawableShape(sh)) { dropped += 1; continue; }
+    sh = migrate(sh);
+    if (!sh.id || seenId[sh.id]) sh.id = uid();   // ID が重なると nodes を共有して片方しか描かれない
+    seenId[sh.id] = true;
+    // レイヤーを持たない旧ファイルの図形は、いちばん下のレイヤーに入れる
+    if (!known[sh.layer]) sh.layer = layers[0].id;
+    shapes.push(sh);
+  }
+
+  var camera = data.camera
+    ? { x:num(data.camera.x, 0), y:num(data.camera.y, 0),
+        s:Math.min(MAX_S, Math.max(MIN_S, num(data.camera.s, 1))) }
+    : { x:cam.x, y:cam.y, s:cam.s };
+
+  // ── ここから差し替え。以降は失敗しない ──
+  commitEdit();
+  doc.layers = layers;
+  currentLayer = layers[layers.length - 1].id;
+  doc.shapes = shapes;
+  cam = camera;
+  if (next) { fileHandle = next.handle || null; fileName = next.name || fileName; }
   sel = []; past.length = 0; future.length = 0;
   for (var id in nodes) { nodes[id].remove(); delete nodes[id]; }
+  renderLayerList();
+  applyThemeById(THEMES[data.theme] ? data.theme : "forest", false);   // 記録がなければ既定テーマ
   syncHistoryButtons(); markDirty(false); applyCamera(); render();
-  setEnvNote(fileHandle ? "" : (ENV.canPickSave
+  var note = fileHandle ? "" : (ENV.canPickSave
     ? "この開き方では上書き先が決まりません。最初の保存で保存先を選んでください"
-    : ""));
+    : "");
+  if (dropped) note = "読めない図形 " + dropped + " 個を読み飛ばしました" + (note ? " · " + note : "");
+  setEnvNote(note);
 }
 /** 第1段階（version 1）のファイルを読めるようにする */
 function migrate(s) {
@@ -2805,23 +3156,26 @@ function writeHandle(text) {
 function openFile() {
   commitEdit();
   if (ENV.canPickOpen) {
+    var picked = null;
     window.showOpenFilePicker({ multiple:false })
-      .then(function (hs) { fileHandle = hs[0]; fileName = fileHandle.name; return fileHandle.getFile(); })
+      .then(function (hs) { picked = hs[0]; return picked.getFile(); })
       .then(function (f) { return f.text(); })
-      .then(load)
+      // 上書き先の差し替えは load の中で、読み込みに成功してから行う。
+      // ここで先に確定させると、開けなかったファイルを Ctrl+S で上書きしてしまう
+      .then(function (t) { load(t, { handle:picked, name:picked.name }); })
       .catch(function (err) { if (err && err.name !== "AbortError") setEnvNote("読み込めませんでした: " + err.message); });
   } else { els.picker.value = ""; els.picker.click(); }
 }
 els.picker.addEventListener("change", function () {
   var f = els.picker.files && els.picker.files[0];
   if (!f) return;
-  // <input type="file"> で開いた場合は元のファイルへの書き込み口がない。
-  // 以降の保存は「保存先を尋ねる」か「書き出し」になる。
-  fileHandle = null;
-  fileName = f.name;
   var fr = new FileReader();
   fr.onload = function (e) {
-    try { load(e.target.result); } catch (err) { setEnvNote("読み込めませんでした: " + err.message); }
+    // <input type="file"> で開いた場合は元のファイルへの書き込み口がない。
+    // 以降の保存は「保存先を尋ねる」か「書き出し」になる。
+    // 失敗したときは今の保存先とファイル名をそのまま残す
+    try { load(e.target.result, { handle:null, name:f.name }); }
+    catch (err) { setEnvNote("読み込めませんでした: " + err.message); }
   };
   fr.readAsText(f);
 });
@@ -2870,8 +3224,10 @@ function buildSVG(scope) {
   for (var j = 0; j < all.length; j++) {
     if (!keep[all[j].getAttribute("data-id")]) all[j].remove();
   }
+  // 画面で隠している要素は中身ごと取り除く。
+  // style を外すだけだと、消したはずのラベルが古い位置に復活する
   var hidden = g.querySelectorAll('[style*="display: none"]');
-  for (var k = 0; k < hidden.length; k++) hidden[k].removeAttribute("style");
+  for (var k = 0; k < hidden.length; k++) hidden[k].remove();
 
   var root = svg("svg", {
     viewBox:r2(x) + " " + r2(y) + " " + r2(w) + " " + r2(h),
@@ -3027,11 +3383,47 @@ function setTool(t) {
   els.wrap.classList.remove("linking");
   els.wrap.classList.toggle("drawing", t === "pen");
   els.wrap.classList.toggle("placing", t === "text" || t === "note" || t === "rect");
+  // 狭い画面では枠・直線・フレームが「その他」の中に隠れるので、
+  // 選ばれていることが分かるように親のボタンにも印を付ける
+  var more = document.getElementById("btnToolMore");
+  more.classList.toggle("act", t === "rect" || t === "line" || t === "frame");
+  railMoreToggle(false);
   syncProps();
 }
-document.getElementById("toolbar").addEventListener("click", function (e) {
+document.getElementById("tools").addEventListener("click", function (e) {
   var b = e.target.closest ? e.target.closest("[data-tool]") : null;
   if (b) setTool(b.getAttribute("data-tool"));
+});
+
+/* ── 畳んだ面（ツールの「その他」・メニュー） ──
+   どちらも #wrap の外にあるので、キャンバスのポインタ処理とは無関係に開閉できる。 */
+function railMoreToggle(on) {
+  var m = document.getElementById("railmore"), btn = document.getElementById("btnToolMore");
+  var open = (on == null) ? !m.classList.contains("open") : !!on;
+  m.classList.toggle("open", open);
+  btn.setAttribute("aria-expanded", String(open));
+}
+function sheetToggle(on) {
+  var sh = document.getElementById("sheet"), btn = document.getElementById("btnMore");
+  sh.hidden = (on == null) ? !sh.hidden : !on;
+  document.getElementById("scrim").hidden = sh.hidden;
+  btn.setAttribute("aria-expanded", String(!sh.hidden));
+  btn.setAttribute("aria-pressed", String(!sh.hidden));
+}
+/** 畳んだ面をまとめて閉じる（Escape・外側を押したとき） */
+function closePopovers() {
+  sheetToggle(false);
+  railMoreToggle(false);
+}
+document.getElementById("btnToolMore").onclick = function () { railMoreToggle(); };
+document.getElementById("btnMore").onclick = function () { railMoreToggle(false); sheetToggle(); };
+document.getElementById("btnSheetClose").onclick = function () { sheetToggle(false); };
+// 外側を押したら閉じる。キャンバスの pointerdown より後に走るだけなので、描画には影響しない
+document.addEventListener("pointerdown", function (e) {
+  var t = e.target;
+  if (!t || !t.closest) return;
+  if (!t.closest("#sheet") && !t.closest("#btnMore")) sheetToggle(false);
+  if (!t.closest("#tools")) railMoreToggle(false);
 });
 document.getElementById("btnUndo").onclick = undo;
 document.getElementById("btnRedo").onclick = redo;
@@ -3158,6 +3550,7 @@ function ctxOpenCenter() {
 function helpToggle(show) {
   var h = document.getElementById("help");
   h.hidden = (show == null) ? !h.hidden : !show;
+  if (!h.hidden) closePopovers();      // メニューから開いたとき、狭い画面で重なるのを避ける
   document.getElementById("btnHelp").setAttribute("aria-pressed", String(!h.hidden));
   if (!h.hidden) document.getElementById("btnHelpClose").focus();
 }
@@ -3187,12 +3580,19 @@ window.addEventListener("keydown", function (e) {
   var t = e.target, tag = t && t.tagName ? t.tagName : "";
   if (t === els.editor || tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
   if (tag === "BUTTON") {
-    if (e.key === "Escape") { e.preventDefault(); t.blur(); els.wrap.focus(); }
+    if (e.key === "Escape") { e.preventDefault(); closePopovers(); t.blur(); els.wrap.focus(); }
     return;
   }
-  if (e.key === "F6") { e.preventDefault(); var fb = document.querySelector("#toolbar button"); if (fb) fb.focus(); return; }
+  if (e.key === "F6") {
+    // 先頭の「元に戻す」は無効なことがあり、無効なボタンには focus が入らない
+    e.preventDefault();
+    var fb = document.querySelector("#toolbar button:not([disabled])");
+    if (fb) fb.focus();
+    return;
+  }
   if (e.key === "?" || (e.key === "/" && e.shiftKey) || e.key === "F1") { e.preventDefault(); helpToggle(); return; }
   if (!document.getElementById("help").hidden && e.key === "Escape") { e.preventDefault(); helpToggle(false); return; }
+  if (e.key === "Escape" && !document.getElementById("sheet").hidden) { e.preventDefault(); closePopovers(); return; }
   if (e.key === "Tab") {
     e.preventDefault();
     cycleSelection(e.shiftKey ? -1 : 1);
@@ -3235,7 +3635,7 @@ window.addEventListener("keydown", function (e) {
   }
 
   if (e.key === "Delete" || e.key === "Backspace") { if (sel.length) { e.preventDefault(); deleteSel(); } return; }
-  if (e.key === "+" || e.key === ";" || (e.key === "=" && !e.shiftKey)) { e.preventDefault(); zoomCenter(1.2); return; }
+  if (e.key === "+" || (e.key === "=" && !e.shiftKey)) { e.preventDefault(); zoomCenter(1.2); return; }
   if (e.key === "-") { e.preventDefault(); zoomCenter(1 / 1.2); return; }
   if (e.key === "0") { e.preventDefault(); zoomCenter(1 / cam.s); return; }
   if (e.key === "9") { e.preventDefault(); fitAll(); return; }
@@ -3311,6 +3711,24 @@ syncHistoryButtons();
 applyCamera();
 render();
 syncProps();
+
+/* ════════════════════════════════════════════
+   14. テスト用の口
+   ── test.html から検証するためだけの取っ手。
+      ここではすでにある関数と値への参照を集めるだけで、
+      既存の変数も処理の順番も変えない。本番の動作には影響しない。
+      doc と cam は読み込みで差し替わるため、参照ではなく関数で渡す。
+   ════════════════════════════════════════════ */
+window.__WB_TEST__ = {
+  num:num, drawableShape:drawableShape, migrate:migrate,
+  wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
+  sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
+  load:load, serialize:serialize, buildSVG:buildSVG, render:render,
+  grid:grid, MIN_S:MIN_S, MAX_S:MAX_S, LINE_H:LINE_H, NOTE_PAD:NOTE_PAD,
+  getDoc:function () { return doc; },
+  getCam:function () { return cam; },
+  getInks:function () { return INKS; }   // テーマ切り替えで差し替わるので関数で渡す
+};
 
 })();
 </script>
