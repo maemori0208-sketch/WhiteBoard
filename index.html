@@ -110,6 +110,14 @@ button{
 button:focus-visible{ outline:2px solid var(--accent-soft); outline-offset:1px; }
 button[aria-pressed="true"]{ background:var(--accent); color:#fff; }
 button[disabled]{ opacity:.35; cursor:default; }
+/* 入・切を地色だけで伝えると、色を見分けられない環境で状態が分からない（WCAG 1.4.1）。
+   文字は aria-pressed から作るので、表示と支援技術が読む値が食い違うことはない */
+.onoff{
+  font-family:var(--mono); font-size:10.5px; padding:0 3px;
+  border:1px solid currentColor; border-radius:3px; opacity:.85;
+}
+button[aria-pressed="true"] .onoff::after{ content:"入"; }
+button[aria-pressed="false"] .onoff::after{ content:"切"; }
 button .k{ opacity:.55; font-family:var(--mono); font-size:10.5px; }
 
 /* アイコンは file:// でも確実に出るよう、外部フォントに頼らず手書きの SVG にする */
@@ -203,6 +211,9 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
 #sheet .srow + .srow{ border-top:1px solid var(--rule); }
 #sheet .stag{ font-size:11.5px; opacity:.6; min-width:64px; }
 #sheet button{ background:var(--ink-700); }
+/* 上の規則は特異度 1,0,1 で button[aria-pressed="true"]（0,1,1）に勝つ。
+   記述順では覆せないので、押した状態の地色はここで塗り直す */
+#sheet button[aria-pressed="true"]{ background:var(--accent); color:#fff; }
 
 /* 書式パネルはキャンバス上に浮かせる。上下バーの高さを変えると、
    ドラッグ中にキャンバスの原点が動いて図形がずれるため。 */
@@ -335,6 +346,7 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
 .dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:1px; }
 .dot.on{ background:var(--accent); } .dot.off{ background:var(--warn); }
 .dot.dirty{ background:var(--warn); } .dot.clean{ background:var(--muted); }
+.dot.mute{ background:var(--muted); }   /* 「切」を表す点。異常ではないので --warn は使わない */
 
 /* button の背景色に transition を掛けているので、この打ち消しは効いている */
 @media (prefers-reduced-motion: reduce){ *{ transition:none !important; } }
@@ -436,11 +448,15 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
   #help dl{ grid-template-columns:1fr; gap:0; }
   #help dt{ margin-top:10px; }
 
-  /* 環境と手がかりを先に出す。残りは横スクロールで読む */
+  /* 環境・吸着・手がかりを先に出す。残りは横スクロールで読む。
+     吸着・ガイドは作業中に確かめたいので、スクロールなしで見える位置に置く。
+     グリッドの間隔は盤目として画面に出ているので、狭いときは数値を省く */
   #status .cell{ padding:4px 8px; }
   #stEnv{ order:1; }
-  #stHint{ order:2; max-width:62vw; }
-  #stZoom{ order:3; } #stCount{ order:4; } #stFile{ order:5; } #stBackup{ order:6; }
+  #stMode{ order:2; }
+  #stMode .gsize{ display:none; }
+  #stHint{ order:3; max-width:62vw; }
+  #stZoom{ order:4; } #stCount{ order:5; } #stFile{ order:6; } #stBackup{ order:7; }
   .hintFull{ display:none; }
   .hintShort{ display:inline; }
 }
@@ -518,8 +534,8 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
         <option value="40">40</option>
         <option value="80">80</option>
       </select>
-      <button id="btnSnap" aria-pressed="false" title="移動・作成・大きさ変更をグリッドにそろえる">吸着</button>
-      <button id="btnGuide" aria-pressed="true" title="他の図形との位置ぞろえ・等間隔をドラッグ中に案内する">ガイド</button>
+      <button id="btnSnap" aria-pressed="false" title="移動・作成・大きさ変更をグリッドにそろえる">吸着<span class="onoff" aria-hidden="true"></span></button>
+      <button id="btnGuide" aria-pressed="true" title="他の図形との位置ぞろえ・等間隔をドラッグ中に案内する">ガイド<span class="onoff" aria-hidden="true"></span></button>
     </div>
 
     <div class="srow">
@@ -735,6 +751,7 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
   <div id="status">
     <div class="cell" id="stZoom">100%</div>
     <div class="cell" id="stCount">0 個</div>
+    <div class="cell" id="stMode"></div>
     <div class="cell" id="stFile"></div>
     <div class="cell" id="stEnv" role="status" aria-live="polite"></div>
     <div class="cell" id="stBackup"></div>
@@ -2399,11 +2416,11 @@ function onOverlay(e) {
  * そこでパネル自身の段階で伝播を止め、キャンバスまで届かないようにしておく。
  * 同じ要素に登録された本来のハンドラは stopPropagation の影響を受けない。
  */
+var OVERLAY_IDS = ["props", "layers", "restore", "editor", "ctxmenu", "help"];
 (function stopOverlayEvents() {
-  var ids = ["props", "layers", "restore", "editor", "ctxmenu", "help"];
   var types = ["pointerdown", "pointerup", "pointermove", "dblclick", "click", "wheel"];
-  for (var i = 0; i < ids.length; i++) {
-    var el = document.getElementById(ids[i]);
+  for (var i = 0; i < OVERLAY_IDS.length; i++) {
+    var el = document.getElementById(OVERLAY_IDS[i]);
     if (!el) continue;
     for (var t = 0; t < types.length; t++) {
       el.addEventListener(types[t], function (e) { e.stopPropagation(); });
@@ -3008,17 +3025,30 @@ function serialize() {
 function num(v, d) { v = Number(v); return isFinite(v) ? v : d; }
 
 var SHAPE_TYPES = { text:1, note:1, rect:1, image:1, stroke:1, line:1, frame:1 };
+/* 種類ごとに、bbox が外接矩形を出すのに要る座標。ひとつでも欠けると NaN になる */
+var SHAPE_COORDS = {
+  text:["x", "y", "w"], note:["x", "y", "w", "h"], rect:["x", "y", "w", "h"],
+  image:["x", "y", "w", "h"], frame:["x", "y", "w", "h"],
+  line:["x1", "y1", "x2", "y2"], stroke:[]
+};
+/** 座標として使える値か。"12" のような文字列は bbox の足し算で文字列連結になるので弾く */
+function coord(v) { return typeof v === "number" && isFinite(v); }
 /**
  * 描画できる図形かどうか。
  * 未知の種類は createNode が空の <g> を返して updateNode が落ち、
  * 点のない stroke は bbox と pathD が落ちる。どちらも読み飛ばす。
+ * 座標が数値でない図形は、bbox の NaN が unionBox 経由で書き出しの viewBox まで広がり、
+ * pathD も "MNaN NaN" を吐くので、ここで止める。
  */
 function drawableShape(sh) {
   if (!sh || typeof sh !== "object" || SHAPE_TYPES[sh.type] !== 1) return false;   // toString など Object の持ち物を拾わない
+  var need = SHAPE_COORDS[sh.type], i;
+  for (i = 0; i < need.length; i++) if (!coord(sh[need[i]])) return false;
   if (sh.type === "stroke") {
     if (!Array.isArray(sh.points) || !sh.points.length) return false;
-    for (var i = 0; i < sh.points.length; i++) {
-      if (!sh.points[i] || typeof sh.points[i] !== "object") return false;
+    for (i = 0; i < sh.points.length; i++) {
+      var p = sh.points[i];
+      if (!p || typeof p !== "object" || !coord(p.x) || !coord(p.y)) return false;
     }
   }
   return true;
@@ -3082,7 +3112,12 @@ function load(json, next) {
   if (dropped) note = "読めない図形 " + dropped + " 個を読み飛ばしました" + (note ? " · " + note : "");
   setEnvNote(note);
 }
-/** 第1段階（version 1）のファイルを読めるようにする */
+/**
+ * 第1段階（version 1）のファイルを読めるようにする。
+ * あわせて、bbox が参照する size ・ width が数値でない図形をここで直す。
+ * drawableShape で弾かないのは、これらを必須にすると
+ * 値を持たない旧ファイルの図形まで捨ててしまうため。
+ */
 function migrate(s) {
   if (s.type === "rect") {
     if (s.stroke && !s.color) s.color = s.stroke;
@@ -3090,6 +3125,15 @@ function migrate(s) {
     if (!s.width) s.width = 1.5;
   }
   if (s.type === "note" && !s.color) s.color = INKS[0];
+  // bbox は text/note で size（textHeight / noteHeight 経由）を、
+  // line/stroke で width（headSize・pad 経由）を使う。数値でないと
+  // NaN が unionBox を通って書き出しの viewBox まで広がる。
+  // 既定値はリテラルで持つ。style（次に作る図形の書式）を使うと、
+  // 同じファイルでも書式パネルの選択次第で読み込み結果が変わってしまう。
+  if ((s.type === "text" || s.type === "note") && !coord(s.size)) s.size = 18;
+  if ((s.type === "line" || s.type === "stroke") && !coord(s.width)) s.width = 2.5;
+  // rect の width は上で 1.5 を入れるが、"abc" のような真値は拾えない
+  if (s.type === "rect" && !coord(s.width)) s.width = 1.5;
   return s;
 }
 
@@ -3397,19 +3441,80 @@ document.getElementById("tools").addEventListener("click", function (e) {
 
 /* ── 畳んだ面（ツールの「その他」・メニュー） ──
    どちらも #wrap の外にあるので、キャンバスのポインタ処理とは無関係に開閉できる。 */
+/**
+ * 面の中で今フォーカスを移せる部品を並べる。
+ * 見出し（.shead）のように幅によって隠れる部品があるので、
+ * querySelectorAll の結果から見えていないものを落とす。
+ */
+function focusables(panel) {
+  var all = panel.querySelectorAll("button, select, input, textarea, a[href]"), out = [];
+  for (var i = 0; i < all.length; i++) {
+    if (!all[i].disabled && all[i].offsetParent) out.push(all[i]);
+  }
+  return out;
+}
+/** キーボードで辿ってきたフォーカスかどうか。対応していない環境では常に false */
+function focusFromKey(el) {
+  try { return !!(el && el.matches && el.matches(":focus-visible")); }
+  catch (err) { return false; }
+}
+/**
+ * 閉じる面の中にフォーカスが残ると display:none で body へ落ち、キーボード操作が続かなくなる。
+ * そこで呼び出し元（back）へ戻す。マウスで押しただけのときに戻すと、
+ * ボタンにフォーカスが残って V・T などのショートカットが死ぬので、その場合は外すだけにする。
+ */
+function focusBack(panel, back) {
+  var a = document.activeElement;
+  if (!panel.contains(a)) return;
+  if (!focusFromKey(a)) { a.blur(); return; }
+  if (back && back.offsetParent) back.focus(); else els.wrap.focus();
+}
+/** シートか「その他」のどちらかが開いていれば覆いを出す。片方だけ出すと非対称になる */
+function syncScrim() {
+  var open = !document.getElementById("sheet").hidden ||
+             document.getElementById("railmore").classList.contains("open");
+  document.getElementById("scrim").hidden = !open;
+}
 function railMoreToggle(on) {
   var m = document.getElementById("railmore"), btn = document.getElementById("btnToolMore");
   var open = (on == null) ? !m.classList.contains("open") : !!on;
   m.classList.toggle("open", open);
   btn.setAttribute("aria-expanded", String(open));
+  document.getElementById("tools").classList.toggle("raise", open);   // 覆いより前に出す
+  syncScrim();
+  // 広い画面では「その他」の中身はレールに並んだままで btnToolMore も出ていない。
+  // 何も隠れないのでフォーカスは動かさない（出ているかどうかは offsetParent で見分ける）
+  if (!open && btn.offsetParent) focusBack(m, btn);
 }
 function sheetToggle(on) {
-  var sh = document.getElementById("sheet"), btn = document.getElementById("btnMore");
+  var sh = document.getElementById("sheet"), btn = document.getElementById("btnMore"), was = sh.hidden;
   sh.hidden = (on == null) ? !sh.hidden : !on;
-  document.getElementById("scrim").hidden = sh.hidden;
-  btn.setAttribute("aria-expanded", String(!sh.hidden));
-  btn.setAttribute("aria-pressed", String(!sh.hidden));
+  syncScrim();
+  btn.setAttribute("aria-expanded", String(!sh.hidden));   // 開閉ボタンなので aria-pressed は付けない
+  if (!sh.hidden && was) {
+    // 覆いで背後を触れなくしている以上、フォーカスも面の中へ入れる
+    var f = focusables(sh);
+    if (f.length) f[0].focus();
+  } else if (sh.hidden && !was) focusBack(sh, btn);
 }
+/**
+ * 面の中で Tab を巡回させ、Escape で閉じる。
+ * 覆いで背後を触れなくしているのに Tab だけ背後へ抜けると、
+ * 見えていない部品を操作することになる。
+ */
+function trapPanel(panel, close) {
+  panel.addEventListener("keydown", function (e) {
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); close(); return; }
+    if (e.key !== "Tab") return;
+    var f = focusables(panel);
+    if (!f.length) return;
+    var first = f[0], last = f[f.length - 1], a = document.activeElement;
+    if (e.shiftKey && (a === first || !panel.contains(a))) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && (a === last || !panel.contains(a))) { e.preventDefault(); first.focus(); }
+  });
+}
+trapPanel(document.getElementById("sheet"), function () { sheetToggle(false); });
+trapPanel(document.getElementById("help"), function () { helpToggle(false); });
 /** 畳んだ面をまとめて閉じる（Escape・外側を押したとき） */
 function closePopovers() {
   sheetToggle(false);
@@ -3418,13 +3523,16 @@ function closePopovers() {
 document.getElementById("btnToolMore").onclick = function () { railMoreToggle(); };
 document.getElementById("btnMore").onclick = function () { railMoreToggle(false); sheetToggle(); };
 document.getElementById("btnSheetClose").onclick = function () { sheetToggle(false); };
-// 外側を押したら閉じる。キャンバスの pointerdown より後に走るだけなので、描画には影響しない
+/* 外側を押したら閉じる。#props などは要素の段階で pointerdown の伝播を止めるので、
+   bubble で登録するとパネルの中を押したときにここまで届かず、開いた面が閉じ残る。
+   capture なら stopPropagation より先に走る。キャンバスの pointerdown よりも先になるが、
+   ここでは面の開閉しかしないので描画には影響しない（preventDefault は呼ばないこと）。 */
 document.addEventListener("pointerdown", function (e) {
   var t = e.target;
   if (!t || !t.closest) return;
   if (!t.closest("#sheet") && !t.closest("#btnMore")) sheetToggle(false);
   if (!t.closest("#tools")) railMoreToggle(false);
-});
+}, true);
 document.getElementById("btnUndo").onclick = undo;
 document.getElementById("btnRedo").onclick = redo;
 document.getElementById("btnZoomIn").onclick = function () { zoomCenter(1.2); };
@@ -3435,6 +3543,7 @@ document.getElementById("selGrid").onchange = function () {
   grid.size = parseFloat(this.value);
   if (grid.size <= 0) setSnap(false);
   applyCamera();
+  setModeNote();
 };
 document.getElementById("btnSnap").onclick = function () { setSnap(!grid.snap); };
 document.getElementById("selTheme").onchange = function () {
@@ -3446,23 +3555,70 @@ document.getElementById("btnGuide").onclick = function () {
   guideOn = !guideOn;
   this.setAttribute("aria-pressed", String(guideOn));
   if (!guideOn) clearGuides();
+  setModeNote();
 };
 function setSnap(on) {
   grid.snap = !!on && grid.size > 0;
   document.getElementById("btnSnap").setAttribute("aria-pressed", String(grid.snap));
+  setModeNote();
+}
+/**
+ * グリッド・吸着・ガイドの状態をステータスバーに出す。
+ * メニューを開かないと分からないと、作業中に「いま吸着が効いているか」を確かめられない。
+ * 点の色だけでなく「入」「切」の文字も添える（WCAG 1.4.1）。
+ * セルを増やしても #status は横に並ぶだけなので、--status-h は変わらない。
+ */
+function setModeNote() {
+  var el = document.getElementById("stMode");
+  el.innerHTML =
+    '<span class="gsize">グリッド ' + (grid.size > 0 ? grid.size : "なし") + " · </span>" +
+    '<span class="dot ' + (grid.snap ? "on" : "mute") + '"></span>吸着 ' + (grid.snap ? "入" : "切") + " · " +
+    '<span class="dot ' + (guideOn ? "on" : "mute") + '"></span>ガイド ' + (guideOn ? "入" : "切");
+  el.title = "グリッドの間隔・吸着・ガイドの状態。切り替えはメニューから";
 }
 document.getElementById("btnOpen").onclick = openFile;
 document.getElementById("btnSave").onclick = save;
 document.getElementById("btnSaveAs").onclick = saveAs;
 
+/**
+ * キャンバスの上に浮いている部品（ツールのレール／ドック・ズーム・書式パネル）が
+ * 隠している幅を、上下左右それぞれについて求める。
+ * 幅によって配置が変わるので、CSS の式を写すと二重管理になる。実際の位置から測る。
+ * 部品ごとに「いちばん少なく空ければ避けられる辺」を選び、その辺だけを削る。
+ */
+function overlayInset() {
+  var w = els.wrap.getBoundingClientRect(), pad = 24;   // 図形と画面の縁の最低限の隙間
+  var ins = { top:pad, right:pad, bottom:pad, left:pad };
+  var keys = ["left", "right", "top", "bottom"];
+  var ids = ["tools", "zoom", "props"];
+  for (var i = 0; i < ids.length; i++) {
+    var el = document.getElementById(ids[i]);
+    if (!el || !el.offsetParent) continue;              // 隠れている部品は場所を取らない
+    var r = el.getBoundingClientRect();
+    if (!r.width || !r.height) continue;
+    if (r.right <= w.left || r.left >= w.right || r.bottom <= w.top || r.top >= w.bottom) continue;
+    var cost = [r.right - w.left, w.right - r.left, r.bottom - w.top, w.bottom - r.top];
+    var min = 0;
+    for (var c = 1; c < 4; c++) if (cost[c] < cost[min]) min = c;
+    var k = keys[min];
+    if (cost[min] + pad > ins[k]) ins[k] = cost[min] + pad;
+  }
+  // 背の低い・幅の狭いウィンドウで見える範囲が消えないよう、削るのは各辺 4 割までにする
+  ins.left = Math.min(ins.left, w.width * 0.4); ins.right = Math.min(ins.right, w.width * 0.4);
+  ins.top = Math.min(ins.top, w.height * 0.4); ins.bottom = Math.min(ins.bottom, w.height * 0.4);
+  return ins;
+}
 function fitAll() {
   var vis = visibleShapes();
   if (!vis.length) { cam = { x:-80, y:-60, s:1 }; applyCamera(); return; }
-  var b = unionBox(vis), r = els.wrap.getBoundingClientRect(), pad = 48;
+  var b = unionBox(vis), r = els.wrap.getBoundingClientRect(), ins = overlayInset();
+  var vw = Math.max(80, r.width - ins.left - ins.right);
+  var vh = Math.max(80, r.height - ins.top - ins.bottom);
   cam.s = Math.min(MAX_S, Math.max(MIN_S,
-    Math.min((r.width - pad * 2) / Math.max(1, b.w), (r.height - pad * 2) / Math.max(1, b.h))));
-  cam.x = b.x + b.w / 2 - r.width / 2 / cam.s;
-  cam.y = b.y + b.h / 2 - r.height / 2 / cam.s;
+    Math.min(vw / Math.max(1, b.w), vh / Math.max(1, b.h))));
+  // 浮いている部品を避けたぶん、合わせる中心は画面の中央からずれる
+  cam.x = b.x + b.w / 2 - (ins.left + vw / 2) / cam.s;
+  cam.y = b.y + b.h / 2 - (ins.top + vh / 2) / cam.s;
   applyCamera();
 }
 
@@ -3471,11 +3627,11 @@ function fitAll() {
    ══════════════════════════════════════════════ */
 /** 図形が画面の外にいたら、見えるところまでキャンバスを寄せる */
 function ensureVisible(b) {
-  var r = els.wrap.getBoundingClientRect();
+  var r = els.wrap.getBoundingClientRect(), m = overlayInset();
   var a = toScreen(b.x, b.y), c = toScreen(b.x + b.w, b.y + b.h);
-  var m = 48, dx = 0, dy = 0;
-  if (a.x < m) dx = a.x - m; else if (c.x > r.width - m) dx = c.x - (r.width - m);
-  if (a.y < m) dy = a.y - m; else if (c.y > r.height - m) dy = c.y - (r.height - m);
+  var dx = 0, dy = 0;
+  if (a.x < m.left) dx = a.x - m.left; else if (c.x > r.width - m.right) dx = c.x - (r.width - m.right);
+  if (a.y < m.top) dy = a.y - m.top; else if (c.y > r.height - m.bottom) dy = c.y - (r.height - m.bottom);
   if (dx || dy) { cam.x += dx / cam.s; cam.y += dy / cam.s; applyCamera(); }
 }
 /** Tab で図形を順に選ぶ */
@@ -3547,12 +3703,21 @@ function ctxOpenCenter() {
   var first = document.querySelector("#ctxmenu [data-ins]");
   if (first) first.focus();
 }
+/* ヘルプを開く前のフォーカス元。#btnHelp はシートの中にあり、閉じたときには
+   隠れていることがあるので、戻り先は開いた時点で控えておく */
+var helpOpener = null;
 function helpToggle(show) {
-  var h = document.getElementById("help");
+  var h = document.getElementById("help"), was = h.hidden;
   h.hidden = (show == null) ? !h.hidden : !show;
   if (!h.hidden) closePopovers();      // メニューから開いたとき、狭い画面で重なるのを避ける
   document.getElementById("btnHelp").setAttribute("aria-pressed", String(!h.hidden));
-  if (!h.hidden) document.getElementById("btnHelpClose").focus();
+  if (!h.hidden) {
+    if (was) helpOpener = document.activeElement;   // シートを閉じたあとの戻り先を控える
+    document.getElementById("btnHelpClose").focus();
+  } else if (!was) {
+    focusBack(h, helpOpener);
+    helpOpener = null;
+  }
 }
 document.getElementById("btnHelp").onclick = function () { helpToggle(); };
 document.getElementById("btnHelpClose").onclick = function () { helpToggle(false); };
@@ -3568,11 +3733,23 @@ document.getElementById("ctxmenu").addEventListener("keydown", function (e) {
   } else if (e.key === "Escape") { e.preventDefault(); ctxClose(); els.wrap.focus(); }
 });
 
-// マウスで押したボタンにフォーカスが残ると、以降のショートカットが効かなくなるので外す
-document.addEventListener("click", function (e) {
+/*
+ * マウスで押したボタンにフォーカスが残ると、以降のショートカットが効かなくなるので外す。
+ * ただし #props などの面は stopOverlayEvents が click の伝播を止めるため、
+ * document まで届かない。面そのものにも同じ処理を登録して取りこぼしをなくす。
+ * stopPropagation は同じ要素に登録した他のハンドラを止めないので、これで届く。
+ * capture ではなく bubble に足すのは、ボタン自身の onclick より先に blur すると
+ * helpToggle が控える戻り先（document.activeElement）が body になってしまうため。
+ */
+function blurClickedButton(e) {
   var b = e.target.closest ? e.target.closest("button") : null;
   if (b && e.detail > 0) b.blur();
-});
+}
+document.addEventListener("click", blurClickedButton);
+for (var oi = 0; oi < OVERLAY_IDS.length; oi++) {
+  var oel = document.getElementById(OVERLAY_IDS[oi]);
+  if (oel) oel.addEventListener("click", blurClickedButton);
+}
 
 window.addEventListener("keydown", function (e) {
   // 編集欄・書式パネルの入力部品・ボタンにフォーカスがある間は横取りしない。
@@ -3704,6 +3881,7 @@ function setEnvNote(extra) {
 }
 els.wrap.setAttribute("tabindex", "-1");   // Escape でキャンバスへ戻れるように
 setEnvNote("");
+setModeNote();
 renderLayerList();
 backupInit();
 markDirty(false);
