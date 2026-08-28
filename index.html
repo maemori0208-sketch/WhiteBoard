@@ -350,8 +350,12 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
   scrollbar-width:none; -webkit-overflow-scrolling:touch;
 }
 #status::-webkit-scrollbar{ display:none; }
-#status .cell{ flex:0 0 auto; padding:4px 10px; border-right:1px solid var(--rule); opacity:.8; white-space:nowrap; }
-#status .cell:last-child{ border-right:0; }
+/* 区切り線をやめ、間隔で分ける。空欄が消えても余分な線が残らない */
+#status{ gap:18px; }
+#status .cell{ flex:0 0 auto; padding:4px 0; opacity:.8; white-space:nowrap; }
+#status .cell:empty{ display:none; }
+#status .dmode{ opacity:.55; }   /* 知らせることが無い欄は場所を取らない */
+#status .cell[hidden]{ display:none; }
 #status .cell.hint{ opacity:.55; overflow:hidden; text-overflow:ellipsis; }
 .hintShort{ display:none; }          /* 狭い画面では短いほうに差し替える */
 .dot{ display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:1px; }
@@ -467,7 +471,11 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
   #stMode{ order:2; }
   #stMode .gsize{ display:none; }
   #stHint{ order:3; max-width:62vw; }
-  #stZoom{ order:4; } #stCount{ order:5; } #stFile{ order:6; } #stBackup{ order:7; }
+  #stCount{ order:4; } #stFile{ order:5; } #stBackup{ order:6; }
+  /* 狭い画面では二次的な情報を落とす。個数と自動保存の時刻は無くても操作に困らず、
+     未保存かどうかは stFile の点の色で分かる */
+  #stCount, #stBackup{ display:none; }
+  #stFile .dstate{ display:none; }
   .hintFull{ display:none; }
   .hintShort{ display:inline; }
 }
@@ -771,13 +779,12 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
   </div>
 
   <div id="status">
-    <div class="cell" id="stZoom">100%</div>
     <div class="cell" id="stCount">0 個</div>
     <div class="cell" id="stMode"></div>
     <div class="cell" id="stFile"></div>
     <div class="cell" id="stEnv" role="status" aria-live="polite"></div>
     <div class="cell" id="stBackup"></div>
-    <div class="cell hint" id="stHint"><span class="hintFull">ダブルクリックで文字入力／Shift+ドラッグで縦横を固定／Space+ドラッグで移動／Ctrl+ホイールで拡大縮小／? でキーボード操作一覧</span><span class="hintShort">長押しで挿入／2本指で移動・拡大</span></div>
+    <div class="cell hint" id="stHint"><span class="hintFull">ダブルクリックで文字入力／Space+ドラッグで移動／? で操作一覧</span><span class="hintShort">長押しで挿入／2本指で移動・拡大</span></div>
   </div>
 
 </div>
@@ -1033,6 +1040,25 @@ function scaleShape(sh, sx, sy, ox, oy, snap) {
   // 文字は h を持たない（内容と折り返し幅から決まる）ので触らない
   if (sh.type !== "text") sh.h = (snap ? snap.h : sh.h) * sy;
 }
+/**
+ * 複数選択の拡大縮小で、どの図形も下限を割らない最小の倍率を返す。
+ * 図形ごとに大きさを止めると相似が崩れて外接矩形と中身がずれるので、倍率のほうを止める。
+ * 下限は単体の大きさ変更と同じ値（矩形の類は 24、文字の幅は 40）。
+ * 掴んだ時点ですでに下限を割っている図形があっても拡大に化けないよう、返す値は 1 を超えない。
+ */
+function minScale(list) {
+  var sx = 0, sy = 0;
+  for (var i = 0; i < list.length; i++) {
+    var s = list[i];
+    // 線と手書きは太さだけで決まる大きさなので下限を持たない
+    if (!s || s.type === "line" || s.type === "stroke") continue;
+    var mw = s.type === "text" ? 40 : 24;
+    if (s.w > 0) sx = Math.max(sx, Math.min(1, mw / s.w));
+    // 文字は h を持たない（内容と折り返し幅から決まる）
+    if (s.type !== "text" && s.h > 0) sy = Math.max(sy, Math.min(1, 24 / s.h));
+  }
+  return { sx:sx, sy:sy };
+}
 
 /* ── 文字の折り返し ─────────────────────── */
 function tokenize(line) {
@@ -1170,7 +1196,6 @@ function applyCamera() {
   }
   drawSelection();
   if (editing) placeEditor();
-  document.getElementById("stZoom").textContent = Math.round(cam.s * 100) + "%";
 }
 function render() {
   // id → 図形の対応はこの render の中だけで使う。doc.shapes は読み込み・削除・
@@ -1186,6 +1211,8 @@ function render() {
   var hidden = doc.shapes.length - list.length;
   document.getElementById("stCount").textContent =
     doc.shapes.length + " 個" + (hidden ? "（非表示 " + hidden + "）" : "");
+  // 操作のヒントは、まだ何も描いていないときだけ出す。常に出しているとステータスバーが埋まる
+  document.getElementById("stHint").hidden = doc.shapes.length > 0;
 }
 
 /** list を省略すると自分で求める。render からは求め済みのものを受け取る */
@@ -2003,6 +2030,8 @@ document.getElementById("ctxmenu").addEventListener("click", function (e) {
       座標と寸法はすべて TPL_GRID の倍数にしてある。吸着を入れても格子から外れない。
    ══════════════════════════════════════════════ */
 var TPL_GRID = 24;
+/** 先客と重なるとき、右隣へ逃がすときの隙間。版面どうしの境目が分かる程度に空ける */
+var TPL_GAP = 96;
 
 /* テンプレートの外枠。makeFrame は「フレームN」の連番を消費するが、
    ここではテンプレート名を付けるので番号が余る。連番を無駄に進めないため直接組み立てる */
@@ -2114,7 +2143,7 @@ function buildTemplate(kind, ox, oy) {
   return out;
 }
 
-/** メニューから選んだテンプレートを、いまの表示の中央に挿入する */
+/** メニューから選んだテンプレートを、いまの表示の中央に挿入する（先客と重なるときは右隣へ逃がす） */
 function insertTemplate(kind) {
   var t = TEMPLATES[kind];
   if (!t) return;
@@ -2128,6 +2157,17 @@ function insertTemplate(kind) {
   // 版面は TPL_GRID の倍数で組んである。原点も丸めておかないと全体が格子からずれる
   var ox = Math.round((c.x - t.w / 2) / TPL_GRID) * TPL_GRID;
   var oy = Math.round((c.y - t.h / 2) / TPL_GRID) * TPL_GRID;
+  // 挿入したあと fitBox が版面を中央へ寄せるので、続けて挿入すると中央がほぼ同じ位置になり
+  // 版面同士がほとんど重なる。先客と重なるなら、既存の図形全体の右隣へ間隔を空けて置く。
+  // 逃がし先は全体の外接矩形の外なので、繰り返し試す必要はない（無限ループにならない）。
+  // 非表示レイヤーの図形も「先客」に数える。見えない図形と重ねると、表示に戻した途端に重なるため
+  if (doc.shapes.length) {
+    var ub = unionBox(doc.shapes);
+    if (ub && ox < ub.x + ub.w && ub.x < ox + t.w && oy < ub.y + ub.h && ub.y < oy + t.h) {
+      ox = Math.ceil((ub.x + ub.w + TPL_GAP) / TPL_GRID) * TPL_GRID;
+      oy = Math.round(ub.y / TPL_GRID) * TPL_GRID;
+    }
+  }
 
   var snap = snapshot();
   var made = buildTemplate(kind, ox, oy);
@@ -2555,6 +2595,7 @@ function ptDist(a, b) { return Math.hypot(a.x - b.x, a.y - b.y); }
 function abortDrag() {
   if (!drag) return;
   if (drag.snap) restoreState(drag.snap);
+  // 範囲選択の選択内容はここでは触らない。Escape で打ち切ったときだけ全部解除する（呼び出し側の役目）
   drag = null;
   liveStroke = null;
   els.wrap.classList.remove("panning");
@@ -2715,7 +2756,7 @@ els.wrap.addEventListener("pointerdown", function (e) {
   if (hk && sel.length > 1) {
     // 複数選択は外接矩形の変化に比例させるので、全図形の掴んだ時点の姿を控える
     var msel = selected();
-    drag = { mode:"scale", k:hk, box:unionBox(msel), w0:w,
+    drag = { mode:"scale", k:hk, box:unionBox(msel), w0:w, minS:minScale(msel),
              orig:msel.map(function (s) { return { id:s.id, snap:clone(s) }; }),
              snap:snapshot(), changed:false };
     els.wrap.setPointerCapture(e.pointerId);
@@ -3037,6 +3078,10 @@ els.wrap.addEventListener("pointermove", function (e) {
     // 動かさない側の辺を原点にすると、そちらは掴んだ位置に留まる
     var msx = mb0.w > 0 ? (mx1 - mx0) / mb0.w : 1;
     var msy = mb0.h > 0 ? (my1 - my0) / mb0.h : 1;
+    // 下限は外接矩形ではなく倍率にかける。図形ごとに止めると相似が崩れるうえ、
+    // 付箋のように内容で高さが伸びる図形は幅が潰れたぶんだけ縦に暴れる
+    if (msx < drag.minS.sx) msx = drag.minS.sx;
+    if (msy < drag.minS.sy) msy = drag.minS.sy;
     var mox = mkw ? mx1 : mx0, moy = mkn ? my1 : my0;
     for (var mi = 0; mi < drag.orig.length; mi++) {
       var mo = drag.orig[mi], ms = byId(mo.id);
@@ -3433,7 +3478,11 @@ function load(json, next) {
   sel = []; past.length = 0; future.length = 0;
   for (var id in nodes) { nodes[id].remove(); delete nodes[id]; }
   renderLayerList();
-  applyThemeById(THEMES[data.theme] ? data.theme : "dark", false);   // 記録がなければ既定テーマ
+  // 記録が無いファイルは、既定テーマが深緑だった頃のもの。図形の色も深緑の値で入っている。
+  // ここを現在の既定（ダーク）にすると、色を置き換えない（第2引数 false）ぶん
+  // 深緑の濃い文字がダークの紙に載って、コントラスト 1.06 で見えなくなる。
+  // 既定テーマを変えても、この行は動かさないこと。
+  applyThemeById(THEMES[data.theme] ? data.theme : "forest", false);
   syncHistoryButtons(); markDirty(false); applyCamera(); render();
   var note = fileHandle ? "" : (ENV.canPickSave
     ? "この開き方では上書き先が決まりません。最初の保存で保存先を選んでください"
@@ -3672,17 +3721,17 @@ function backupAvailable() {
   return !!(window.isSecureContext && navigator.storage && navigator.storage.getDirectory);
 }
 function backupInit() {
-  if (!backupAvailable()) { setBackupNote("自動バックアップなし（この環境では使えません）"); return; }
-  setBackupNote("自動バックアップ 準備中");
+  if (!backupAvailable()) { setBackupNote(""); return; }   // 使えないことは stFile の title で分かる
+  setBackupNote("");
   navigator.storage.getDirectory().then(function (root) {
     backup.dir = root;
     backup.ready = true;
     return root.getFileHandle(BACKUP_FILE, { create:false }).then(function (h) { return h.getFile(); });
   }).then(function (f) {
     if (f && f.size > 40) offerRestore(f);
-    else setBackupNote("自動バックアップ 待機中");
+    else setBackupNote("");
   }).catch(function () {
-    setBackupNote(backup.ready ? "自動バックアップ 待機中" : "自動バックアップ 使えません");
+    setBackupNote(backup.ready ? "" : "自動保存 使えません");
   }).then(function () {
     if (backup.ready) setInterval(backupWrite, BACKUP_SEC * 1000);
   });
@@ -3700,12 +3749,12 @@ function backupWrite() {
     .then(function (wr) { return wr.write(text).then(function () { return wr.close(); }); })
     .then(function () {
       backup.last = new Date();
-      setBackupNote("自動バックアップ " + hhmm(backup.last));
+      setBackupNote("自動保存 " + hhmm(backup.last));
     })
-    .catch(function () { backup.ready = false; setBackupNote("自動バックアップ 失敗"); });
+    .catch(function () { backup.ready = false; setBackupNote("自動保存できません"); });
 }
 function offerRestore(file) {
-  setBackupNote("自動バックアップ " + hhmm(new Date(file.lastModified)));
+  setBackupNote("自動保存 " + hhmm(new Date(file.lastModified)));
   var bar = document.getElementById("restore");
   document.getElementById("restoreWhen").textContent = hhmm(new Date(file.lastModified));
   bar.hidden = false;
@@ -3727,11 +3776,13 @@ function markDirty(v) {
   var mode = fileHandle ? "上書き" : "書き出し";
   document.getElementById("stFile").innerHTML =
     '<span class="dot ' + (v ? "dirty" : "clean") + '"></span>' +
-    (v ? "未保存の変更あり" : "保存済み") + " · " + escapeHtml(fileName) +
-    ' <span style="opacity:.55">(' + mode + ')</span>';
+    '<span class="dstate">' + (v ? "未保存の変更あり" : "保存済み") + " · </span>" +
+    escapeHtml(fileName) + ' <span class="dmode">(' + mode + ')</span>';
   document.getElementById("stFile").title = fileHandle
-    ? "Ctrl+S でこのファイルに上書きします"
-    : "このファイルは上書きできません。Ctrl+S は書き出し（ダウンロード）になります";
+    ? "Ctrl+S でこのファイルに上書きします（" + ENV.scheme + "）"
+    : (ENV.canPickSave
+        ? "保存先がまだ決まっていません。Ctrl+S で保存先を選びます（" + ENV.scheme + "）"
+        : "この環境では上書き保存が使えません。Ctrl+S は書き出し（ダウンロード）になります（" + ENV.scheme + "）");
 }
 function escapeHtml(s) {
   return String(s).replace(/[&<>"]/g, function (c) {
@@ -4097,7 +4148,20 @@ window.addEventListener("keydown", function (e) {
   // （F6 でツールバーへ移ったあと、Tab や Enter が本来どおり働くようにするため）
   var t = e.target, tag = t && t.tagName ? t.tagName : "";
   if (t === els.editor || tag === "SELECT" || tag === "INPUT" || tag === "TEXTAREA") return;
-  if (tag === "BUTTON") {
+  // ドラッグ中の Escape は変形そのものを取り消す。
+  // ここで拾わないと、選択枠が消えたあともポインタを離すまで変形が続き、履歴にも積まれる
+  // 範囲選択の途中で打ち切ったときは、拾いかけた分も掴む前の分も残さず全部解除する
+  if (e.key === "Escape" && drag) {
+    e.preventDefault();
+    if (drag.mode === "marquee") sel = [];
+    abortDrag();
+    return;
+  }
+  // ボタンに焦点があるあいだ単独キーは横取りしない（Tab / Enter / Space / 方向キーを本来どおり働かせる）。
+  // ただし Ctrl / Meta の組み合わせは素通しする。キーボードでメニューから挿入すると
+  // focusBack が焦点をボタンへ返すため、直後の Ctrl+Z が理由も分からず効かなくなるので。
+  // Windows の AltGr は ctrlKey + altKey として届くので、それは組み合わせとみなさない
+  if (tag === "BUTTON" && !((e.ctrlKey || e.metaKey) && !e.altKey)) {
     if (e.key === "Escape") { e.preventDefault(); closePopovers(); t.blur(); els.wrap.focus(); }
     return;
   }
@@ -4206,19 +4270,30 @@ window.addEventListener("keyup", function (e) {
 window.addEventListener("blur", function () {
   spaceDown = false; els.wrap.classList.remove("pannable"); ctxClose();
 });
-window.addEventListener("resize", applyCamera);
+window.addEventListener("resize", function () {
+  applyCamera();
+  // 幅が広がると #railmore はベース規則の display:flex に戻るが .open は残る。
+  // 覆い（広い画面では透明）が出たままになり、次のクリックを飲んでしまうので閉じておく
+  closePopovers();
+});
 
 /* ══════════════════════════════════════════════
    13. 起動
    ══════════════════════════════════════════════ */
+/**
+ * 知らせることがあるときだけ出す通知欄。空にすると :empty で欄ごと消える。
+ * 上書きできる環境かどうかは stFile の「(上書き)/(書き出し)」と title で分かるので、
+ * ここに常時出すと同じことを二度言うことになる。
+ */
+var envNoteTimer = null;
+var ENV_NOTE_SEC = 10;
 function setEnvNote(extra) {
-  var el = document.getElementById("stEnv"), ok = ENV.canPickSave;
-  el.innerHTML = '<span class="dot ' + (ok ? "on" : "off") + '"></span>' +
-    escapeHtml(ENV.scheme) + " · " + (ok ? "上書き保存 可" : "書き出しのみ") +
-    (extra ? " · " + escapeHtml(extra) : "");
-  el.title = ok
-    ? "File System Access API が使えます。Ctrl+S で同じファイルに上書き保存します。"
-    : "この環境では File System Access API が使えないため、保存はダウンロードになります。";
+  var el = document.getElementById("stEnv");
+  el.innerHTML = extra ? '<span class="dot off"></span>' + escapeHtml(extra) : "";
+  el.title = extra || "";
+  // 用の済んだ知らせを残さない。出しっぱなしにするとステータスバーが埋まっていく
+  if (envNoteTimer) { clearTimeout(envNoteTimer); envNoteTimer = null; }
+  if (extra) envNoteTimer = setTimeout(function () { setEnvNote(""); }, ENV_NOTE_SEC * 1000);
 }
 els.wrap.setAttribute("tabindex", "-1");   // Escape でキャンバスへ戻れるように
 setEnvNote("");
@@ -4242,7 +4317,7 @@ window.__WB_TEST__ = {
   num:num, drawableShape:drawableShape, migrate:migrate,
   wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
   sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
-  scaleShape:scaleShape,
+  scaleShape:scaleShape, minScale:minScale,
   load:load, serialize:serialize, buildSVG:buildSVG, render:render,
   grid:grid, MIN_S:MIN_S, MAX_S:MAX_S, LINE_H:LINE_H, NOTE_PAD:NOTE_PAD,
   getDoc:function () { return doc; },
