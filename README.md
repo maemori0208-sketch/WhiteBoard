@@ -18,13 +18,14 @@
 
    ```
    index.html                 ← whiteboard.html をこの名前にする
-   icon.svg
-   icon-180.png
-   icon-192.png
-   icon-512.png
-   icon-512-maskable.png
    manifest.json
    README.md
+   icon/
+     icon.svg
+     icon-180.png
+     icon-192.png
+     icon-512.png
+     icon-512-maskable.png
    ```
 
 2. リポジトリの **Settings → Pages** を開き、Source を **Deploy from a branch**、Branch を **main / (root)** にします
@@ -157,6 +158,26 @@ SVG と PNG に書き出せます。範囲は「全体 / 選択範囲 / フレ�
 - **共同編集はできません**。1 人で使う前提の設計です
 - **リポジトリを public にする必要があります**（GitHub Pages の無料枠を使う場合）。板書の内容をリポジトリに含めない運用にしてください
 - 拡張機能による自動的な配色の反転を辞退する宣言を入れています。暗い配色で使いたい場合はアプリ内のテーマから選んでください
+
+---
+
+## テスト
+
+`test.html` にテストページが入っています。テストの実行にビルドもインストールも要りません。`index.html` を隠した iframe で読み込み、その中で動いている関数をそのまま呼んで確かめます。
+
+**`file://` では動きません。** ブラウザは `file://` で開いた HTML をオリジンの無い文書として扱うため、iframe の中身に触れられないからです。次のどちらかで HTTP 配信してから開いてください。
+
+```
+python -m http.server 8000
+```
+
+```
+npx --yes http-server -p 8000
+```
+
+配信したら `http://localhost:8000/test.html` を開きます。合計・成功・失敗の件数が上に出て、失敗した場合は期待値と実際の値が並びます。全部緑なら通っています。
+
+テストが読み取るのは `index.html` の末尾にある `window.__WB_TEST__` だけです。ここは関数への参照を集めているだけで、アプリの動作には関わりません。
 
 ---
 
