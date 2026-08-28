@@ -1007,6 +1007,32 @@ function moveShape(sh, dx, dy, snap) {
     sh.y = (snap ? snap.y : sh.y) + dy;
   }
 }
+/**
+ * snap（掴んだ時点の複製）を基準に、原点 (ox, oy) から sx / sy 倍する。
+ * 文字の大きさ（size）と線の太さ（width）は倍率をかけない。
+ * 単一図形の大きさ変更もこの 2 つを変えないので、複数選択だけ変えると挙動が食い違うため。
+ */
+function scaleShape(sh, sx, sy, ox, oy, snap) {
+  if (sh.type === "line") {
+    sh.x1 = ox + ((snap ? snap.x1 : sh.x1) - ox) * sx;
+    sh.y1 = oy + ((snap ? snap.y1 : sh.y1) - oy) * sy;
+    sh.x2 = ox + ((snap ? snap.x2 : sh.x2) - ox) * sx;
+    sh.y2 = oy + ((snap ? snap.y2 : sh.y2) - oy) * sy;
+    return;
+  }
+  if (sh.type === "stroke") {
+    for (var i = 0; i < sh.points.length; i++) {
+      sh.points[i].x = ox + ((snap ? snap.points[i].x : sh.points[i].x) - ox) * sx;
+      sh.points[i].y = oy + ((snap ? snap.points[i].y : sh.points[i].y) - oy) * sy;
+    }
+    return;
+  }
+  sh.x = ox + ((snap ? snap.x : sh.x) - ox) * sx;
+  sh.y = oy + ((snap ? snap.y : sh.y) - oy) * sy;
+  sh.w = (snap ? snap.w : sh.w) * sx;
+  // 文字は h を持たない（内容と折り返し幅から決まる）ので触らない
+  if (sh.type !== "text") sh.h = (snap ? snap.h : sh.h) * sy;
+}
 
 /* ── 文字の折り返し ─────────────────────── */
 function tokenize(line) {
@@ -1707,9 +1733,10 @@ function drawSelection() {
     fill:"none", stroke:TH.accent, "stroke-width":1.25,
     "stroke-dasharray":shapes.length > 1 ? "4 3" : "none"
   }));
-  if (shapes.length !== 1 || shapes[0].type === "stroke") return;   // 手書きは移動のみ
+  if (shapes.length === 1 && shapes[0].type === "stroke") return;   // 単体の手書きは移動のみ
 
-  var hs = handlesFor(shapes[0]);
+  // 複数選択は外接矩形の四隅で全体を拡大・縮小する（辺は出さない）
+  var hs = shapes.length > 1 ? cornerHandles(b) : handlesFor(shapes[0]);
   for (var i = 0; i < hs.length; i++) {
     var p = toScreen(hs[i].x, hs[i].y);
     layer.appendChild(svg("rect", {
@@ -1729,6 +1756,10 @@ function handlesFor(sh) {
     { k:"e", x:b.x + b.w, y:b.y + b.h / 2, cursor:"ew-resize" },
     { k:"w", x:b.x, y:b.y + b.h / 2, cursor:"ew-resize" }
   ];
+  return cornerHandles(b);
+}
+/** 矩形の四隅のハンドル。単体の矩形系と複数選択で共用する */
+function cornerHandles(b) {
   return [
     { k:"nw", x:b.x, y:b.y, cursor:"nwse-resize" },
     { k:"ne", x:b.x + b.w, y:b.y, cursor:"nesw-resize" },
@@ -2681,6 +2712,15 @@ els.wrap.addEventListener("pointerdown", function (e) {
     els.wrap.setPointerCapture(e.pointerId);
     return;
   }
+  if (hk && sel.length > 1) {
+    // 複数選択は外接矩形の変化に比例させるので、全図形の掴んだ時点の姿を控える
+    var msel = selected();
+    drag = { mode:"scale", k:hk, box:unionBox(msel), w0:w,
+             orig:msel.map(function (s) { return { id:s.id, snap:clone(s) }; }),
+             snap:snapshot(), changed:false };
+    els.wrap.setPointerCapture(e.pointerId);
+    return;
+  }
 
   if (tool === "pen") {
     liveStroke = makeStroke();
@@ -2956,6 +2996,55 @@ els.wrap.addEventListener("pointermove", function (e) {
     render();
     return;
   }
+  if (drag.mode === "scale") {
+    drag.changed = true;
+    // 外接矩形の辺を動かし、その変化分を倍率に直して全図形にかける。
+    // 辺の決め方は単体の大きさ変更と同じにして、振る舞いをそろえる
+    var mb0 = drag.box;
+    var mdx = w.x - drag.w0.x, mdy = w.y - drag.w0.y;
+    var mx0 = mb0.x, my0 = mb0.y, mx1 = mb0.x + mb0.w, my1 = mb0.y + mb0.h;
+    var mkw = drag.k.indexOf("w") >= 0, mke = drag.k.indexOf("e") >= 0;
+    var mkn = drag.k.indexOf("n") >= 0, mks = drag.k.indexOf("s") >= 0;
+    // Shift は水平・垂直のうち動きの大きいほうに固定する（負けた側の辺の印を落とす）
+    if (e.shiftKey) {
+      if (Math.abs(mdx) >= Math.abs(mdy)) { mkn = false; mks = false; } else { mkw = false; mke = false; }
+    }
+    if (mkw) mx0 = Math.min(sv(mb0.x + mdx), mx1 - 24);
+    if (mke) mx1 = Math.max(sv(mb0.x + mb0.w + mdx), mx0 + 24);
+    if (mkn) my0 = Math.min(sv(mb0.y + mdy), my1 - 24);
+    if (mks) my1 = Math.max(sv(mb0.y + mb0.h + mdy), my0 + 24);
+
+    if (guideOn && !(grid.snap && grid.size > 0)) {
+      var exm = Object.create(null);
+      for (var mq = 0; mq < drag.orig.length; mq++) exm[drag.orig[mq].id] = true;
+      var othm = guideTargets(exm), gthm = GUIDE_PX / cam.s;
+      var m1 = mkw ? snapAxis(mx0, othm, "v", gthm) : null;
+      if (m1 && m1.pos < mx1 - 24) mx0 = m1.pos; else m1 = null;
+      var m2 = mke ? snapAxis(mx1, othm, "v", gthm) : null;
+      if (m2 && m2.pos > mx0 + 24) mx1 = m2.pos; else m2 = null;
+      var m3 = mkn ? snapAxis(my0, othm, "h", gthm) : null;
+      if (m3 && m3.pos < my1 - 24) my0 = m3.pos; else m3 = null;
+      var m4 = mks ? snapAxis(my1, othm, "h", gthm) : null;
+      if (m4 && m4.pos > my0 + 24) my1 = m4.pos; else m4 = null;
+      var mnb = { x:mx0, y:my0, w:mx1 - mx0, h:my1 - my0 }, mgl = [];
+      if (m1) mgl.push(axisGuide(mx0, "v", mnb, othm));
+      if (m2) mgl.push(axisGuide(mx1, "v", mnb, othm));
+      if (m3) mgl.push(axisGuide(my0, "h", mnb, othm));
+      if (m4) mgl.push(axisGuide(my1, "h", mnb, othm));
+      drawGuides(mgl);
+    } else clearGuides();
+
+    // 動かさない側の辺を原点にすると、そちらは掴んだ位置に留まる
+    var msx = mb0.w > 0 ? (mx1 - mx0) / mb0.w : 1;
+    var msy = mb0.h > 0 ? (my1 - my0) / mb0.h : 1;
+    var mox = mkw ? mx1 : mx0, moy = mkn ? my1 : my0;
+    for (var mi = 0; mi < drag.orig.length; mi++) {
+      var mo = drag.orig[mi], ms = byId(mo.id);
+      if (ms) scaleShape(ms, msx, msy, mox, moy, mo.snap);
+    }
+    render();
+    return;
+  }
   if (drag.mode === "resize") {
     drag.changed = true;
     var sh = byId(drag.id), o = drag.start;
@@ -3151,7 +3240,7 @@ function finishDrag(e) {
     setTool("select");
   }
   if (mode === "move" && (drag.moved || drag.dup)) pushSnapshot(drag.snap);
-  if (mode === "resize" && drag.changed) pushSnapshot(drag.snap);
+  if ((mode === "resize" || mode === "scale") && drag.changed) pushSnapshot(drag.snap);
   drag = null;
   render();
 }
@@ -4153,6 +4242,7 @@ window.__WB_TEST__ = {
   num:num, drawableShape:drawableShape, migrate:migrate,
   wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
   sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
+  scaleShape:scaleShape,
   load:load, serialize:serialize, buildSVG:buildSVG, render:render,
   grid:grid, MIN_S:MIN_S, MAX_S:MAX_S, LINE_H:LINE_H, NOTE_PAD:NOTE_PAD,
   getDoc:function () { return doc; },
