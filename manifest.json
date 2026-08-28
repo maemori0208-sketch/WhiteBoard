@@ -1,0 +1,17 @@
+{
+  "name": "ホワイトボード",
+  "short_name": "ホワイトボード",
+  "description": "テキスト中心の無限キャンバス",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#1e2124",
+  "theme_color": "#17181b",
+  "icons": [
+    { "src": "icon/icon.svg", "sizes": "any", "type": "image/svg+xml" },
+    { "src": "icon/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icon/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}
