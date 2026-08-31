@@ -226,6 +226,35 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
    記述順では覆せないので、押した状態の地色はここで塗り直す */
 #sheet button[aria-pressed="true"]{ background:var(--accent); color:#fff; }
 
+/* ── テンプレートを選ぶダイアログ ─────────────
+   #sheet と同じく #wrap の外（#app の子）に置く。#wrap の中に入れると
+   touch-action:none を継承して一覧をスクロールできなくなるため。
+   覆い（#scrim）より前に出す必要があるので z-index は #scrim(13) より大きく取る */
+#tpldlg{
+  position:absolute; z-index:17;
+  left:50%; top:50%; transform:translate(-50%,-50%);
+  width:min(460px, calc(100% - 24px)); max-height:calc(100% - 40px);
+  overflow-y:auto;
+  background:var(--ink-800); color:var(--chrome-fg);
+  border:1px solid #000; border-radius:12px; box-shadow:0 12px 32px rgba(0,0,0,.45);
+}
+#tpldlg[hidden]{ display:none; }
+#tpldlg .thead{
+  padding:8px 14px; background:var(--ink-700); font-weight:600;
+  position:sticky; top:0;
+}
+#tpldlg .tbody{ display:flex; flex-direction:column; gap:4px; padding:8px 10px; }
+/* 名前と説明を 2 行で見せるので、button の既定（1 行・中央ぞろえ）を打ち消す */
+#tpldlg .titem{
+  flex-direction:column; align-items:flex-start; justify-content:center; gap:2px;
+  width:100%; padding:8px 10px; min-height:0;
+  white-space:normal; text-align:left; background:var(--ink-700); border-radius:8px;
+}
+#tpldlg .tnm{ font-size:13px; font-weight:600; }
+#tpldlg .tds{ font-size:11.5px; opacity:.7; line-height:1.4; }
+@media (hover:hover){ #tpldlg .titem:hover{ background:var(--accent); color:#fff; } }
+#tpldlg .tfoot{ display:flex; justify-content:flex-end; padding:0 10px 10px; }
+
 /* 書式パネルはキャンバス上に浮かせる。上下バーの高さを変えると、
    ドラッグ中にキャンバスの原点が動いて図形がずれるため。 */
 #props{
@@ -271,6 +300,9 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
 #ctxmenu .chead{
   font-size:10.5px; opacity:.5; padding:4px 8px 5px; letter-spacing:.06em;
 }
+/* 2 つめ以降の見出しは区切りを兼ねる。図形 1 個を置く操作と、
+   数十個の版面を置く操作は粒度が違うので、線で切っておく */
+#ctxmenu .chead:not(:first-child){ border-top:1px solid var(--rule); margin-top:3px; padding-top:8px; }
 #ctxmenu button{ justify-content:flex-start; padding:0 10px; font-size:12.5px; border-radius:5px; }
 @media (hover:hover){ #ctxmenu button:hover{ background:var(--accent); color:#fff; } }
 
@@ -600,6 +632,14 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
     </div>
   </div>
 
+  <!-- テンプレートを選ぶダイアログ。挿入メニューとツールの両方から開く。
+       #sheet と同じく #wrap の外（#app の子）。中身は TEMPLATES から buildTplList が組み立てる -->
+  <div id="tpldlg" hidden role="dialog" aria-modal="true" aria-labelledby="tplTitle">
+    <div class="thead"><span id="tplTitle">テンプレートを選ぶ</span></div>
+    <div class="tbody" id="tplList"></div>
+    <div class="tfoot"><button id="btnTplCancel">やめる</button></div>
+  </div>
+
 
   <div id="wrap">
     <svg id="scene" xmlns="http://www.w3.org/2000/svg">
@@ -643,6 +683,9 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
       <button data-ins="line">直線</button>
       <button data-ins="arrow">矢印</button>
       <button data-ins="frame">フレーム</button>
+      <div class="chead">まとめて挿入</div>
+      <!-- data-ins は使わない。click ハンドラが [data-ins] を拾って insertAt を呼ぶため -->
+      <button data-tpl-open="1">テンプレート…</button>
     </div>
 
     <div id="layers" hidden>
@@ -761,6 +804,13 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
       <button data-tool="frame" aria-pressed="false" title="フレーム（F）">
         <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16H4zM4 9h16"/></svg>
         <span class="tl">フレーム</span>
+      </button>
+      <!-- これは「ツール」ではなく「動作」なので data-tool を付けない。
+           付けると setTool の aria-pressed の対象になり、#tools の click 委譲も setTool を呼んでしまう。
+           狭い画面でドックがあふれないよう、「その他」の中に置く -->
+      <button id="btnToolTpl" aria-label="テンプレートを挿入" title="テンプレートを挿入（定型レイアウト）">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5h16v14H4zM4 10h16M10 10v9"/></svg>
+        <span class="tl">テンプレ</span>
       </button>
     </div>
   </div>
@@ -2040,9 +2090,13 @@ function insertAt(kind, p) {
   else { pushSnapshot(snap); render(); }
 }
 document.getElementById("ctxmenu").addEventListener("click", function (e) {
-  var b = e.target.closest ? e.target.closest("[data-ins]") : null;
-  if (!b || !ctxAt) return;
+  if (!ctxAt || !e.target.closest) return;
   var p = ctxAt;
+  // テンプレートは図形 1 個と粒度が違うので、種類を選ぶダイアログを挟む。
+  // 開いた位置はダイアログに預ける（閉じるとき ctxAt は消えるため）
+  if (e.target.closest("[data-tpl-open]")) { ctxClose(); tplDlgOpen(p); return; }
+  var b = e.target.closest("[data-ins]");
+  if (!b) return;
   ctxClose();
   insertAt(b.getAttribute("data-ins"), p);
 });
@@ -2154,11 +2208,17 @@ function tplAnnotate() {
 /* w / h は組み立てた図形から測らず、版面の寸法として持つ。
    挿入位置（表示の中央）を先に決めたいため */
 var TEMPLATES = {
-  kpt:      { name:"ふりかえり（KPT）", w:1152, h:672, build:tplKpt },
-  matrix:   { name:"2×2 マトリクス",    w:1200, h:768, build:tplMatrix },
-  meeting:  { name:"会議メモ",          w:1152, h:720, build:tplMeeting },
-  annotate: { name:"図面注釈セット",    w:1056, h:720, build:tplAnnotate }
+  kpt:      { name:"ふりかえり（KPT）", desc:"Keep / Problem / Try の 3 列。列ごとに空の付箋 3 枚",
+              w:1152, h:672, build:tplKpt },
+  matrix:   { name:"2×2 マトリクス",    desc:"縦横 2 軸で 4 象限に分ける。軸のラベルは書き換えて使う",
+              w:1200, h:768, build:tplMatrix },
+  meeting:  { name:"会議メモ",          desc:"アジェンダ / 決定事項 / ToDo / 保留 の 4 区画",
+              w:1152, h:720, build:tplMeeting },
+  annotate: { name:"図面注釈セット",    desc:"凡例の枠と、番号付きの注釈 5 個。矢印の先は自分で繋ぐ",
+              w:1056, h:720, build:tplAnnotate }
 };
+/** ダイアログに並べる順。for-in の順に頼らず明示する（メニューの select と同じ順） */
+var TPL_ORDER = ["kpt", "matrix", "meeting", "annotate"];
 
 /** 種類を指定して図形の一覧を組み立てる。先頭は必ずフレーム（＝いちばん後ろに描かれる） */
 function buildTemplate(kind, ox, oy) {
@@ -2169,8 +2229,12 @@ function buildTemplate(kind, ox, oy) {
   return out;
 }
 
-/** メニューから選んだテンプレートを、いまの表示の中央に挿入する（先客と重なるときは右隣へ逃がす） */
-function insertTemplate(kind) {
+/**
+ * 選んだテンプレートを挿入する。
+ * at（ワールド座標）を渡すと、そこを版面の左上にして置く。指した場所へ置くための経路。
+ * 渡さないときはいまの表示の中央に置く（先客と重なるときは右隣へ逃がす）。
+ */
+function insertTemplate(kind, at) {
   var t = TEMPLATES[kind];
   if (!t) return;
   var L = layerById(currentLayer);
@@ -2178,20 +2242,28 @@ function insertTemplate(kind) {
   if (L && !L.visible) { setEnvNote("レイヤー「" + L.name + "」は非表示です。表示に切り替えてから挿入してください"); return; }
   if (L && L.locked)   { setEnvNote("レイヤー「" + L.name + "」はロックされています。解除してから挿入してください"); return; }
 
-  var r = els.wrap.getBoundingClientRect();
-  var c = toWorld(r.left + r.width / 2, r.top + r.height / 2);
   // 版面は TPL_GRID の倍数で組んである。原点も丸めておかないと全体が格子からずれる
-  var ox = Math.round((c.x - t.w / 2) / TPL_GRID) * TPL_GRID;
-  var oy = Math.round((c.y - t.h / 2) / TPL_GRID) * TPL_GRID;
-  // 挿入したあと fitBox が版面を中央へ寄せるので、続けて挿入すると中央がほぼ同じ位置になり
-  // 版面同士がほとんど重なる。先客と重なるなら、既存の図形全体の右隣へ間隔を空けて置く。
-  // 逃がし先は全体の外接矩形の外なので、繰り返し試す必要はない（無限ループにならない）。
-  // 非表示レイヤーの図形も「先客」に数える。見えない図形と重ねると、表示に戻した途端に重なるため
-  if (doc.shapes.length) {
-    var ub = unionBox(doc.shapes);
-    if (ub && ox < ub.x + ub.w && ub.x < ox + t.w && oy < ub.y + ub.h && ub.y < oy + t.h) {
-      ox = Math.ceil((ub.x + ub.w + TPL_GAP) / TPL_GRID) * TPL_GRID;
-      oy = Math.round(ub.y / TPL_GRID) * TPL_GRID;
+  var ox, oy;
+  if (at) {
+    // 場所を指して呼ばれたとき（「ここに挿入」）。先客と重なっても逃がさない。
+    // 利用者が場所を指している以上、勝手に動かすと指した意味がなくなる
+    ox = Math.round(at.x / TPL_GRID) * TPL_GRID;
+    oy = Math.round(at.y / TPL_GRID) * TPL_GRID;
+  } else {
+    var r = els.wrap.getBoundingClientRect();
+    var c = toWorld(r.left + r.width / 2, r.top + r.height / 2);
+    ox = Math.round((c.x - t.w / 2) / TPL_GRID) * TPL_GRID;
+    oy = Math.round((c.y - t.h / 2) / TPL_GRID) * TPL_GRID;
+    // 挿入したあと fitBox が版面を中央へ寄せるので、続けて挿入すると中央がほぼ同じ位置になり
+    // 版面同士がほとんど重なる。先客と重なるなら、既存の図形全体の右隣へ間隔を空けて置く。
+    // 逃がし先は全体の外接矩形の外なので、繰り返し試す必要はない（無限ループにならない）。
+    // 非表示レイヤーの図形も「先客」に数える。見えない図形と重ねると、表示に戻した途端に重なるため
+    if (doc.shapes.length) {
+      var ub = unionBox(doc.shapes);
+      if (ub && ox < ub.x + ub.w && ub.x < ox + t.w && oy < ub.y + ub.h && ub.y < oy + t.h) {
+        ox = Math.ceil((ub.x + ub.w + TPL_GAP) / TPL_GRID) * TPL_GRID;
+        oy = Math.round(ub.y / TPL_GRID) * TPL_GRID;
+      }
     }
   }
 
@@ -3875,9 +3947,10 @@ function focusBack(panel, back) {
   if (!focusFromKey(a)) { a.blur(); return; }
   if (back && back.offsetParent) back.focus(); else els.wrap.focus();
 }
-/** シートか「その他」のどちらかが開いていれば覆いを出す。片方だけ出すと非対称になる */
+/** シート・「その他」・テンプレートの面のどれかが開いていれば覆いを出す。片方だけ出すと非対称になる */
 function syncScrim() {
   var open = !document.getElementById("sheet").hidden ||
+             !document.getElementById("tpldlg").hidden ||
              document.getElementById("railmore").classList.contains("open");
   document.getElementById("scrim").hidden = !open;
 }
@@ -3921,6 +3994,62 @@ function trapPanel(panel, close) {
 }
 trapPanel(document.getElementById("sheet"), function () { sheetToggle(false); });
 trapPanel(document.getElementById("help"), function () { helpToggle(false); });
+
+/* ── テンプレートを選ぶダイアログ ──
+   挿入位置の決め方は呼び出し元で変わるので、開いた時点の位置を面が覚えておく。
+   tplAt が null なら自動配置（メニュー（≡）の行と同じ）、座標があればその場所。 */
+var tplAt = null;
+var tplOpener = null;      // 閉じたときの戻り先。開いた時点で控える（呼び出し元は隠れることがある）
+/** 一覧は TEMPLATES から組み立てる。名前と説明の写しを HTML に持つと片方だけ古くなる */
+function buildTplList() {
+  var host = document.getElementById("tplList");
+  for (var i = 0; i < TPL_ORDER.length; i++) {
+    var kind = TPL_ORDER[i], t = TEMPLATES[kind];
+    var b = document.createElement("button");
+    b.className = "titem";
+    b.setAttribute("data-tpl", kind);
+    var nm = document.createElement("span");
+    nm.className = "tnm"; nm.textContent = t.name;
+    var ds = document.createElement("span");
+    ds.className = "tds"; ds.textContent = t.desc;
+    b.appendChild(nm); b.appendChild(ds);
+    host.appendChild(b);
+  }
+}
+buildTplList();
+function tplDlgOpen(at) {
+  var d = document.getElementById("tpldlg");
+  if (!d.hidden) return;
+  tplOpener = document.activeElement;   // closePopovers がフォーカスを動かす前に控える
+  tplAt = at || null;
+  closePopovers();                      // 狭い画面でシートや「その他」と重なるのを避ける
+  d.hidden = false;
+  syncScrim();
+  // 覆いで背後を触れなくしている以上、フォーカスも面の中へ入れる
+  var f = focusables(d);
+  if (f.length) f[0].focus();
+}
+function tplDlgClose() {
+  var d = document.getElementById("tpldlg");
+  if (d.hidden) return;
+  d.hidden = true;
+  syncScrim();
+  focusBack(d, tplOpener);
+  tplAt = null;
+  tplOpener = null;
+}
+trapPanel(document.getElementById("tpldlg"), tplDlgClose);
+document.getElementById("btnTplCancel").onclick = function () { tplDlgClose(); };
+document.getElementById("tpldlg").addEventListener("click", function (e) {
+  var b = e.target.closest ? e.target.closest("[data-tpl]") : null;
+  if (!b) return;
+  var at = tplAt;              // 閉じると消えるので先に取る
+  tplDlgClose();
+  insertTemplate(b.getAttribute("data-tpl"), at);
+});
+/* ツールの「テンプレート」。ここには「指した場所」が無いので位置なしで呼ぶ（＝自動配置）。
+   data-tool を持たないので setTool は走らず、いま選んでいるツールは変わらない */
+document.getElementById("btnToolTpl").onclick = function () { tplDlgOpen(null); };
 /** 畳んだ面をまとめて閉じる（Escape・外側を押したとき） */
 function closePopovers() {
   sheetToggle(false);
@@ -3938,6 +4067,9 @@ document.addEventListener("pointerdown", function (e) {
   if (!t || !t.closest) return;
   if (!t.closest("#sheet") && !t.closest("#btnMore")) sheetToggle(false);
   if (!t.closest("#tools")) railMoreToggle(false);
+  // テンプレートの面は覆いで囲ってあるので、外側＝覆いを押したら閉じる。
+  // 開くのは click（pointerdown より後）なので、開いた直後に自分で閉じることはない
+  if (!t.closest("#tpldlg")) tplDlgClose();
 }, true);
 document.getElementById("btnUndo").onclick = undo;
 document.getElementById("btnRedo").onclick = redo;
@@ -4140,9 +4272,9 @@ function helpToggle(show) {
 document.getElementById("btnHelp").onclick = function () { helpToggle(); };
 document.getElementById("btnHelpClose").onclick = function () { helpToggle(false); };
 
-// メニューは方向キーでも選べるようにする
+// メニューは方向キーでも選べるようにする（テンプレートの行にもここから届く）
 document.getElementById("ctxmenu").addEventListener("keydown", function (e) {
-  var items = [].slice.call(this.querySelectorAll("[data-ins]"));
+  var items = [].slice.call(this.querySelectorAll("[data-ins],[data-tpl-open]"));
   var i = items.indexOf(document.activeElement);
   if (e.key === "ArrowDown" || e.key === "ArrowUp") {
     e.preventDefault();
@@ -4358,6 +4490,7 @@ window.__WB_TEST__ = {
   getDoc:function () { return doc; },
   getCam:function () { return cam; },
   buildTemplate:buildTemplate, TEMPLATES:TEMPLATES,
+  insertTemplate:insertTemplate, TPL_GRID:TPL_GRID, TPL_GAP:TPL_GAP,
   getInks:function () { return INKS; },   // テーマ切り替えで差し替わるので関数で渡す
   getFills:function () { return FILLS; }
 };
