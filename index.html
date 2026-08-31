@@ -178,6 +178,14 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
 }
 #tools .tl{ line-height:1.1; }
 #tools button.act{ background:var(--accent); color:#fff; }
+/* 選択の形の切り替え。押した状態＝自由選択で、印と絵と字が同時に変わる。
+   レールの項目数を増やさないよう、選択ツールのときだけ setTool が出す */
+#btnSelMode[hidden]{ display:none; }
+#btnSelMode .icFree{ display:none; }
+#btnSelMode[aria-pressed="true"] .icRect{ display:none; }
+#btnSelMode[aria-pressed="true"] .icFree{ display:block; }
+#btnSelMode[aria-pressed="false"] .tl::after{ content:"矩形"; }
+#btnSelMode[aria-pressed="true"] .tl::after{ content:"自由"; }
 #railmore{ display:flex; flex-direction:column; gap:4px; }
 #btnToolMore{ display:none; }        /* 広い画面では 8 個すべてをレールに出すので使わない */
 /* 「その他」を開いている間だけ覆い（#scrim）より前に出す。でないとレールの中身を押せない */
@@ -780,6 +788,14 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
       <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 3 19 10l-6.4 2L10 19z"/></svg>
       <span class="tl">選択</span>
     </button>
+    <!-- 選択の形を切り替えるボタン。選択ツールのときだけ setTool が出す。
+         矩形と自由を 2 個並べると狭い画面のドックがあふれるので、交互に切り替える 1 個にしてある。
+         今の形は絵と字（CSS）と押した印（aria-pressed）の 3 つで示す -->
+    <button id="btnSelMode" hidden aria-pressed="false" title="選択の形：矩形（押すと自由選択）">
+      <svg class="ic icRect" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h4M12 6h4M20 6v4M20 12v4M20 18h-4M12 18H8M4 18v-4M4 12V8" /></svg>
+      <svg class="ic icFree" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4c5 0 8 3 8 6s-3 6-8 6-8-3-8-6a5 5 0 0 1 2-4M11 16l-2 4" /></svg>
+      <span class="tl"></span>
+    </button>
     <button data-tool="text" aria-pressed="false" title="文字（T）">
       <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6V4h14v2M12 4v16M9 20h6"/></svg>
       <span class="tl">文字</span>
@@ -929,6 +945,9 @@ var currentLayer = doc.layers[0].id;
 var cam = { x:-80, y:-60, s:1 };
 var sel = [];
 var tool = "select";
+// 選択の形。"rect"（矩形）か "free"（自由）。
+// これは道具の状態なので保存ファイルには入れない（セッション中だけ覚える）
+var selMode = "rect";
 var style = { size:18, color:INKS[0], fill:FILLS[1], width:2.5, arrow:"end", route:"straight" };
 var past = [], future = [], clip = [];
 var dirty = false, fileHandle = null, fileName = "board.json";
@@ -2934,6 +2953,66 @@ var OVERLAY_IDS = ["props", "layers", "restore", "editor", "ctxmenu", "help"];
   }
 })();
 
+/* ── 自由選択（投げ縄）の内外判定 ──────────────
+   囲いは最後の点と最初の点を結んで閉じた多角形として扱う。
+   ポインタ処理から切り離しておく（ここだけなら単体で試せる）。
+   座標はすべてワール座標。pts は {x,y} の配列。
+   ────────────────────────────────── */
+/**
+ * 点が多角形の内側にあるか（右へ伸ばした半直線と辺の交わり数で見る）。
+ * へこんだ形（凹形）でも正しく判定できる。
+ * 辺の真上の点は、左と上の辺なら内側、右と下の辺なら外側に倒れる。
+ * 隣り合う囲いで同じ点が二重に拾われないようにするための、この種の判定の常である。
+ */
+function pointInPoly(pts, x, y) {
+  var inside = false;
+  for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    var xi = pts[i].x, yi = pts[i].y, xj = pts[j].x, yj = pts[j].y;
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) inside = !inside;
+  }
+  return inside;
+}
+/** 線分 ab と線分 cd が交わるか。端点でちょうど触れるだけのときは数えない */
+function segCross(ax, ay, bx, by, cx, cy, dx, dy) {
+  var d1 = (dx - cx) * (ay - cy) - (dy - cy) * (ax - cx);
+  var d2 = (dx - cx) * (by - cy) - (dy - cy) * (bx - cx);
+  var d3 = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+  var d4 = (bx - ax) * (dy - ay) - (by - ay) * (dx - ax);
+  return ((d1 > 0) !== (d2 > 0)) && ((d3 > 0) !== (d4 > 0));
+}
+/**
+ * 外接矩形 b （{x,y,w,h}）が囲いの内側にすっかり入っているか。
+ * 矩形選択と同じ規則（一部だけ重なる図形は選ばない）にするための判定。
+ * 四隅が内側でも、へこんだ辺が矩形を横切っていれば外に出ている部分があるので、辺との交差も見る。
+ */
+function rectInPoly(pts, b) {
+  if (!pts || pts.length < 3 || !b) return false;
+  var x0 = b.x, y0 = b.y, x1 = b.x + b.w, y1 = b.y + b.h;
+  if (!pointInPoly(pts, x0, y0) || !pointInPoly(pts, x1, y0) ||
+      !pointInPoly(pts, x1, y1) || !pointInPoly(pts, x0, y1)) return false;
+  for (var i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    var px = pts[j].x, py = pts[j].y, qx = pts[i].x, qy = pts[i].y;
+    if (segCross(px, py, qx, qy, x0, y0, x1, y0) ||
+        segCross(px, py, qx, qy, x1, y0, x1, y1) ||
+        segCross(px, py, qx, qy, x1, y1, x0, y1) ||
+        segCross(px, py, qx, qy, x0, y1, x0, y0)) return false;
+  }
+  return true;
+}
+/** 囲んだ軌跡を描く。矩形選択の枠と同じ見た目の破線で、最後は自動で閉じる */
+function drawLasso(pts) {
+  var d = "";
+  for (var i = 0; i < pts.length; i++) {
+    var p = toScreen(pts[i].x, pts[i].y);
+    d += (i ? "L" : "M") + r2(p.x) + " " + r2(p.y);
+  }
+  els.selLayer.appendChild(svg("path", {
+    d:d + "Z", fill:"none", stroke:TH.accent, "stroke-width":1, "stroke-dasharray":"3 3"
+  }));
+}
+/** 軌跡に点を足す間隔（画面上の px） */
+var LASSO_MIN_PX = 4;
+
 els.wrap.addEventListener("pointerdown", function (e) {
   if (onOverlay(e)) return;
   ctxClose();                       // キャンバスに触れたらメニューは閉じる
@@ -3051,7 +3130,10 @@ els.wrap.addEventListener("pointerdown", function (e) {
     els.wrap.setPointerCapture(e.pointerId);
   } else {
     sel = e.shiftKey ? sel : [];
-    drag = { mode:"marquee", ox:w.x, oy:w.y, base:sel.slice() };
+    // ここまで来るのは選択ツールのときだけ。形に合わせて囲い方を分ける
+    drag = selMode === "free"
+      ? { mode:"lasso", pts:[{ x:w.x, y:w.y }], base:sel.slice() }
+      : { mode:"marquee", ox:w.x, oy:w.y, base:sel.slice() };
     els.wrap.setPointerCapture(e.pointerId);
     // 空白を長押ししたら挿入メニュー（タッチでの右クリック相当）
     if (e.pointerType === "touch") startLongPress(e.clientX, e.clientY);
@@ -3401,6 +3483,22 @@ els.wrap.addEventListener("pointermove", function (e) {
       x:a.x, y:a.y, width:Math.max(0, c.x - a.x), height:Math.max(0, c.y - a.y),
       fill:"none", stroke:TH.accent, "stroke-width":1, "stroke-dasharray":"3 3"
     }));
+  }
+  if (drag.mode === "lasso") {
+    // 軌跡の点は、前の点から画面上 4px 以上離れたときだけ足す。
+    // 内外判定は辺の数に比例し、それを図形の数だけ繰り返すので、
+    // 点を間引かないと囲っている途中で重くなる。間隔は倍率で割って見た目を揃える
+    var lp = drag.pts[drag.pts.length - 1];
+    if (Math.hypot(w.x - lp.x, w.y - lp.y) * cam.s >= LASSO_MIN_PX) drag.pts.push({ x:w.x, y:w.y });
+    // 選ぶ規則は矩形選択と揃える：外接矩形が囲いに完全に入っているものだけ
+    sel = drag.base.slice();
+    var llist = visibleShapes();
+    for (var q = 0; q < llist.length; q++) {
+      if (!layerEditable(llist[q])) continue;   // ロック中のレイヤーは選べない
+      if (rectInPoly(drag.pts, bbox(llist[q])) && sel.indexOf(llist[q].id) < 0) sel.push(llist[q].id);
+    }
+    drawSelection();
+    drawLasso(drag.pts);
   }
 });
 
@@ -4027,12 +4125,29 @@ function setTool(t) {
   // 選ばれていることが分かるように親のボタンにも印を付ける
   var more = document.getElementById("btnToolMore");
   more.classList.toggle("act", t === "rect" || t === "line" || t === "frame");
+  // 選択の形の切り替えは選択ツールのときだけ出す。
+  // こうすればレールとドックの項目数は、他のツールのときは増えない
+  document.getElementById("btnSelMode").hidden = t !== "select";
   railMoreToggle(false);
   syncProps();
 }
 document.getElementById("tools").addEventListener("click", function (e) {
   var b = e.target.closest ? e.target.closest("[data-tool]") : null;
   if (b) setTool(b.getAttribute("data-tool"));
+});
+/**
+ * 選択の形を決める。"rect"＝矩形を引いて選ぶ、"free"＝囲んで選ぶ。
+ * ボタンに data-tool は付けない（付けると上の委譲が setTool を呼んでツールが変わってしまう）
+ */
+function setSelMode(m) {
+  selMode = m === "free" ? "free" : "rect";
+  var b = document.getElementById("btnSelMode");
+  b.setAttribute("aria-pressed", String(selMode === "free"));
+  b.title = selMode === "free" ? "選択の形：自由（押すと矩形選択）"
+                               : "選択の形：矩形（押すと自由選択）";
+}
+document.getElementById("btnSelMode").addEventListener("click", function () {
+  setSelMode(selMode === "free" ? "rect" : "free");
 });
 
 /* ── 畳んだ面（ツールの「その他」・メニュー） ──
@@ -4429,7 +4544,7 @@ window.addEventListener("keydown", function (e) {
   // 範囲選択の途中で打ち切ったときは、拾いかけた分も掴む前の分も残さず全部解除する
   if (e.key === "Escape" && drag) {
     e.preventDefault();
-    if (drag.mode === "marquee") sel = [];
+    if (drag.mode === "marquee" || drag.mode === "lasso") sel = [];
     abortDrag();
     return;
   }
@@ -4588,7 +4703,8 @@ markDirty(false);
 syncHistoryButtons();
 applyCamera();
 render();
-syncProps();
+// ツールの見た目（選ばれている印と、選択の形の切り替えの出し入れ）を整える。syncProps まで setTool の中で済む
+setTool(tool);
 
 /* ════════════════════════════════════════════
    14. テスト用の口
@@ -4602,6 +4718,7 @@ window.__WB_TEST__ = {
   wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
   sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
   lineGeom:lineGeom, lineRoute:lineRoute,
+  pointInPoly:pointInPoly, rectInPoly:rectInPoly,
   scaleShape:scaleShape, minScale:minScale,
   keyboardInsertPoint:keyboardInsertPoint,
   load:load, serialize:serialize, buildSVG:buildSVG, render:render,
