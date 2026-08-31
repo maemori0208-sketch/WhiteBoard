@@ -614,12 +614,12 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
       <div class="hhead"><span id="helpTitle">キーボードだけで操作する</span><button id="btnHelpClose">閉じる</button></div>
       <div class="hbody">
         <dl>
-          <dt>V T N R L A P F</dt><dd>選択／文字／付箋／枠／直線／矢印／手書き／フレーム</dd>
+          <dt>V T N R L A P F</dt><dd>選択／文字／付箋／枠／直線／矢印／手書き／フレーム（選んだあと Enter で画面の中央に置く。手書きを除く）</dd>
           <dt>Tab / Shift+Tab</dt><dd>図形を順に選ぶ（画面外なら追いかける）</dd>
           <dt>方向キー</dt><dd>選んだ図形を動かす（Shift で大きく、グリッド吸着中は格子ぶん）</dd>
           <dt>Alt+方向キー</dt><dd>選んだ図形の大きさを変える</dd>
           <dt>Alt+Shift+方向キー</dt><dd>その向きに矢印と同じ図形を足す</dd>
-          <dt>Enter / F2</dt><dd>文字を編集（枠や矢印には追従する文字を付ける）</dd>
+          <dt>Enter / F2</dt><dd>選んだ図形の文字を編集（枠や矢印には追従する文字を付ける）</dd>
           <dt>Ctrl+Enter</dt><dd>画面の中央に挿入メニューを出す</dd>
           <dt>Delete</dt><dd>選んだ図形を消す</dd>
           <dt>Ctrl+方向キー</dt><dd>画面をスクロールする</dd>
@@ -1993,6 +1993,29 @@ function ctxClose() {
 function ctxIsOpen() { return !document.getElementById("ctxmenu").hidden; }
 
 /** メニューから選んだ種類の図形を、その位置に既定の大きさで作る */
+/** キーボードだけで置けるツール。手書きは「描く」操作なので入れない */
+var PLACEABLE = { text:1, note:1, rect:1, line:1, arrow:1, frame:1 };
+/** Enter で置くとき、既存の内容との間に空ける縦の隔間 */
+var KEY_INSERT_GAP = 24;
+/* Enter で置く位置を決める。いつも画面の中央だと、そこに図形があると重なる。
+   既存の図形があるときは、全体の外接矩形の左端にそろえてその下へ逃がす。
+   その位置は定義上既存のどれとも重ならないので、空きを探すループは要らない。
+   前に置いた図形が常に最下端になるため、続けて置くと縦一列に並ぶ。
+   非表示レイヤーの図形も「既存」に数える。見えない図形と重ねると、表示に戻した途端に重なるため */
+function keyboardInsertPoint() {
+  if (doc.shapes.length) {
+    var ub = unionBox(doc.shapes);
+    if (ub) {
+      var y = ub.y + ub.h + KEY_INSERT_GAP;
+      // insertAt は先頭で sv() を掛ける。丸めで上へ戻ると重なるので、
+      // 吸着が入のときは先に格子の下側へ切り上げておく（sv はこれ以上動かさない）
+      if (grid.snap && grid.size > 0) y = Math.ceil(y / grid.size) * grid.size;
+      return { x:ub.x, y:y };
+    }
+  }
+  var r = els.wrap.getBoundingClientRect();
+  return toWorld(r.left + r.width / 2, r.top + r.height / 2);
+}
 function insertAt(kind, p) {
   var snap = snapshot();
   var x = sv(p.x), y = sv(p.y), made = null;
@@ -2009,6 +2032,9 @@ function insertAt(kind, p) {
   setTool("select");
   sel = [made.id];
   render();
+  // 置いた先が画面の外のことがある。寄せるのは startEdit より前。
+  // あとで寄せると、開いた編集欄の位置だけが取り残されてずれる
+  ensureVisible(bbox(made));
   // 文字と付箋はそのまま入力に入る（履歴は commitEdit がまとめて積む）
   if (made.type === "text" || made.type === "note") startEdit(made, false, snap);
   else { pushSnapshot(snap); render(); }
@@ -4231,6 +4257,14 @@ window.addEventListener("keydown", function (e) {
     if (ctxIsOpen()) { ctxClose(); return; }
     commitEdit(); sel = []; setTool("select"); drawSelection(); return;
   }
+  // ツールを選んだあとは Enter で置く。位置は keyboardInsertPoint が決める。
+  // ツールキー（N など）を押しても置く手段が無いと、キーボードだけでは図形を作れない。
+  // 置いたあと insertAt が select に戻すので、N → Enter を繰り返せば続けて置ける
+  if (e.key === "Enter" && PLACEABLE[tool]) {
+    e.preventDefault();
+    insertAt(tool, keyboardInsertPoint());
+    return;
+  }
   if (e.key === "Enter" && sel.length === 1) {
     var sh = byId(sel[0]);
     if (!sh) return;
@@ -4318,6 +4352,7 @@ window.__WB_TEST__ = {
   wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
   sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
   scaleShape:scaleShape, minScale:minScale,
+  keyboardInsertPoint:keyboardInsertPoint,
   load:load, serialize:serialize, buildSVG:buildSVG, render:render,
   grid:grid, MIN_S:MIN_S, MAX_S:MAX_S, LINE_H:LINE_H, NOTE_PAD:NOTE_PAD,
   getDoc:function () { return doc; },
