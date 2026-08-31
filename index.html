@@ -734,6 +734,15 @@ select option{ background-color:var(--ink-900); color:var(--chrome-fg); }
       </select>
     </div>
 
+    <div class="group" id="grpRoute">
+      <span class="tag">線の形</span>
+      <select id="selRoute" aria-label="線の形">
+        <option value="straight" selected>直線</option>
+        <option value="elbow">直角</option>
+        <option value="curve">曲線</option>
+      </select>
+    </div>
+
     <div class="sep"></div>
     <div class="group" id="grpAlign">
       <span class="tag">整列</span>
@@ -920,7 +929,7 @@ var currentLayer = doc.layers[0].id;
 var cam = { x:-80, y:-60, s:1 };
 var sel = [];
 var tool = "select";
-var style = { size:18, color:INKS[0], fill:FILLS[1], width:2.5, arrow:"end" };
+var style = { size:18, color:INKS[0], fill:FILLS[1], width:2.5, arrow:"end", route:"straight" };
 var past = [], future = [], clip = [];
 var dirty = false, fileHandle = null, fileName = "board.json";
 var seq = 0;
@@ -1010,7 +1019,8 @@ function makeRect(x, y) { return { id:uid(), type:"rect", x:x, y:y, w:1, h:1, co
 function makeImage(x, y, w, h, src) { return { id:uid(), type:"image", x:x, y:y, w:w, h:h, src:src , layer:currentLayer }; }
 function makeStroke() { return { id:uid(), type:"stroke", points:[], color:style.color, width:style.width , layer:currentLayer }; }
 function makeLine(x, y, arrow) {
-  return { id:uid(), type:"line", x1:x, y1:y, x2:x, y2:y, color:style.color, width:style.width, arrow:arrow, layer:currentLayer };
+  return { id:uid(), type:"line", x1:x, y1:y, x2:x, y2:y, color:style.color, width:style.width,
+           arrow:arrow, route:style.route, layer:currentLayer };
 }
 function makeFrame(x, y) {
   frameSeq += 1;
@@ -1019,13 +1029,99 @@ function makeFrame(x, y) {
 var frameSeq = 0;
 function headSize(sh) { return sh.width * 4 + 5; }
 
+/* 線の形。項目が無い旧ファイルと、知らない値はすべて「直線」に倒す */
+var LINE_ROUTES = { straight:1, elbow:1, curve:1 };
+function lineRoute(sh) { return LINE_ROUTES[sh.route] === 1 ? sh.route : "straight"; }   // toString など Object の持ち物を拾わない
+/* 接続点ごとの外向き。呼ぶたびに作らないよう定数で持つ（読むだけで書き換えない） */
+var DIR_N = { x:0, y:-1 }, DIR_S = { x:0, y:1 }, DIR_W = { x:-1, y:0 }, DIR_E = { x:1, y:0 };
+/** 端点がつながっている辺から、線が図形の外へ出る向きを返す。決まらなければ null */
+function anchorDir(end) {
+  if (!end) return null;
+  if (end.anchor === "n") return DIR_N;
+  if (end.anchor === "s") return DIR_S;
+  if (end.anchor === "w") return DIR_W;
+  if (end.anchor === "e") return DIR_E;
+  return null;   // 中央（"c"）は辺を持たないので向きが決まらない
+}
+/** 出入りの向きを軸だけに落とす。"h"=横 / "v"=縦 / null=決まらない */
+function anchorAxis(end) { var d = anchorDir(end); return d ? (d.x ? "h" : "v") : null; }
+var CURVE_STEPS = 16;   // 曲線を折れ線に近似する分割数。当たり判定と外接矩形の細かさを決める
+var CURVE_MIN = 24;     // 制御点を伸ばす最小の長さ。短い線や引き返す線でも辺から素直に立ち上がる
+/**
+ * 曲線の制御点。dx dy はその端から相手側へ向かう差。
+ * 接続があれば辺の外向きへ、無ければ長いほうの軸（dom）に沿って差の半分だけ伸ばす。
+ */
+function curveCtrl(dir, x, y, dx, dy, dom) {
+  if (dir) {
+    var m = Math.max(CURVE_MIN, Math.abs(dir.x ? dx : dy) / 2);
+    return { x:x + dir.x * m, y:y + dir.y * m };
+  }
+  return dom === "h" ? { x:x + dx / 2, y:y } : { x:x, y:y + dy / 2 };
+}
+/**
+ * 線の経路をここ 1 か所で決める。
+ * 描画は d を、当たり判定・矢じりの向き・外接矩形は pts（折れ線に近似した点）を使う。
+ * 経路は端点 2 つと route から毎回導き、中間点は保存しない。
+ * 保存形式が増えず、端点を動かしたときの追従もひとりでに付いてくるため。
+ *
+ * 直角（elbow）は中間で 2 回折れる。曲線の制御点が中点にあるのと同じで、左右対称の形になる。
+ * どちらの軸へ出るかは、ドラッグ中に向きが揺れないよう、端点の位置ではなく接続だけで決める。
+ *   1. 始点が図形につながっていれば、その辺に対して垂直に出る
+ *   2. 決まらなければ終点の接続に合わせる（2 回折れは出入りが同じ軸なので、そのまま使えば辺に垂直に入る）
+ *   3. どちらも無ければ横に出る
+ * 曲線（curve）は 3 次ベジエ。制御点は curveCtrl が端ごとに決める。
+ * 向きが決まらない端は長いほうの軸に合わせるので、縦に伸びる線でも横に伸びる線でも潰れない。
+ */
+function lineGeom(sh) {
+  var x1 = sh.x1, y1 = sh.y1, x2 = sh.x2, y2 = sh.y2;
+  var route = lineRoute(sh), pts = [{ x:x1, y:y1 }], i;
+  if (route === "elbow") {
+    var fa = anchorAxis(sh.from) || anchorAxis(sh.to) || "h";
+    // 真横・真縦の線は折れる余地が無い。折れ点を入れると長さ 0 の区間ができ、矢じりの向きが出せなくなる
+    if (x1 !== x2 && y1 !== y2) {
+      if (fa === "h") {
+        var mx = (x1 + x2) / 2;
+        pts.push({ x:mx, y:y1 }); pts.push({ x:mx, y:y2 });
+      } else {
+        var my = (y1 + y2) / 2;
+        pts.push({ x:x1, y:my }); pts.push({ x:x2, y:my });
+      }
+    }
+    pts.push({ x:x2, y:y2 });
+    return { d:polyD(pts), pts:pts };
+  }
+  if (route === "curve") {
+    var dx = x2 - x1, dy = y2 - y1;
+    var dom = Math.abs(dx) >= Math.abs(dy) ? "h" : "v";
+    var k1 = curveCtrl(anchorDir(sh.from), x1, y1, dx, dy, dom);
+    var k2 = curveCtrl(anchorDir(sh.to), x2, y2, -dx, -dy, dom);
+    var c1x = k1.x, c1y = k1.y, c2x = k2.x, c2y = k2.y;
+    pts = [];
+    for (i = 0; i <= CURVE_STEPS; i++) {
+      var t = i / CURVE_STEPS, u = 1 - t;
+      var b0 = u * u * u, b1 = 3 * u * u * t, b2 = 3 * u * t * t, b3 = t * t * t;
+      pts.push({ x:b0 * x1 + b1 * c1x + b2 * c2x + b3 * x2,
+                 y:b0 * y1 + b1 * c1y + b2 * c2y + b3 * y2 });
+    }
+    return { d:"M" + r2(x1) + " " + r2(y1) + "C" + r2(c1x) + " " + r2(c1y) +
+                " " + r2(c2x) + " " + r2(c2y) + " " + r2(x2) + " " + r2(y2), pts:pts };
+  }
+  pts.push({ x:x2, y:y2 });
+  return { d:polyD(pts), pts:pts };
+}
+
 function bbox(sh) {
   if (sh.type === "text") return { x:sh.x, y:sh.y, w:sh.w, h:textHeight(sh) };
   if (sh.type === "note") return { x:sh.x, y:sh.y, w:sh.w, h:noteHeight(sh) };
   if (sh.type === "line") {
+    // 曲線は端点の外へ膨らむので、端点 2 つではなく経路の点をすべて包む
     var lp = sh.width / 2 + (sh.arrow === "none" ? 2 : headSize(sh));
-    return { x:Math.min(sh.x1, sh.x2) - lp, y:Math.min(sh.y1, sh.y2) - lp,
-             w:Math.abs(sh.x2 - sh.x1) + lp * 2, h:Math.abs(sh.y2 - sh.y1) + lp * 2 };
+    var lq = lineGeom(sh).pts, lx0 = lq[0].x, ly0 = lq[0].y, lx1 = lq[0].x, ly1 = lq[0].y;
+    for (var li = 1; li < lq.length; li++) {
+      if (lq[li].x < lx0) lx0 = lq[li].x; if (lq[li].x > lx1) lx1 = lq[li].x;
+      if (lq[li].y < ly0) ly0 = lq[li].y; if (lq[li].y > ly1) ly1 = lq[li].y;
+    }
+    return { x:lx0 - lp, y:ly0 - lp, w:lx1 - lx0 + lp * 2, h:ly1 - ly0 + lp * 2 };
   }
   if (sh.type === "stroke") {
     var pad = sh.width / 2 + 2, p = sh.points;
@@ -1312,6 +1408,12 @@ function pathD(sh) {
   for (var i = 1; i < p.length; i++) d += "L" + r2(p[i].x) + " " + r2(p[i].y);
   return d;
 }
+/** 点の列を直線でつないだ d を作る */
+function polyD(pts) {
+  var d = "M" + r2(pts[0].x) + " " + r2(pts[0].y);
+  for (var i = 1; i < pts.length; i++) d += "L" + r2(pts[i].x) + " " + r2(pts[i].y);
+  return d;
+}
 function r2(v) { return Math.round(v * 100) / 100; }
 function headPath(fromX, fromY, tipX, tipY, size) {
   var a = Math.atan2(tipY - fromY, tipX - fromX);
@@ -1370,12 +1472,14 @@ function updateNode(g, sh) {
     return;
   }
   if (sh.type === "line") {
-    bg.setAttribute("d", "M" + r2(sh.x1) + " " + r2(sh.y1) + "L" + r2(sh.x2) + " " + r2(sh.y2));
+    var geo = lineGeom(sh), gp = geo.pts, gn = gp.length;
+    bg.setAttribute("d", geo.d);
     bg.setAttribute("stroke", sh.color);
     bg.setAttribute("stroke-width", sh.width);
     var ah = g.querySelector(".ah"), hd = "";
-    if (sh.arrow === "end" || sh.arrow === "both") hd += headPath(sh.x1, sh.y1, sh.x2, sh.y2, headSize(sh));
-    if (sh.arrow === "both") hd += headPath(sh.x2, sh.y2, sh.x1, sh.y1, headSize(sh));
+    // 矢じりの向きは端点どうしではなく経路の端の区間から出す。折れ線・曲線でも向きが合うため
+    if (sh.arrow === "end" || sh.arrow === "both") hd += headPath(gp[gn - 2].x, gp[gn - 2].y, gp[gn - 1].x, gp[gn - 1].y, headSize(sh));
+    if (sh.arrow === "both") hd += headPath(gp[1].x, gp[1].y, gp[0].x, gp[0].y, headSize(sh));
     ah.setAttribute("d", hd);
     ah.setAttribute("fill", hd ? sh.color : "none");
     return;
@@ -1963,6 +2067,7 @@ function syncProps() {
   show("grpFill",  types.note || types.rect);
   show("grpWidth", types.stroke || types.rect || types.line);
   show("grpArrow", types.line);
+  show("grpRoute", types.line);
   show("grpAlign", shapes.length >= 2);
   show("grpOrder", shapes.length > 0);
   show("grpEdit",  shapes.length > 0);
@@ -1980,6 +2085,7 @@ function syncProps() {
     String(ref && ref.size ? ref.size : (ref && ref.labelSize ? ref.labelSize : style.size));
   document.getElementById("selWidth").value = String(ref && ref.width ? ref.width : style.width);
   document.getElementById("selArrow").value = (ref && ref.arrow) ? ref.arrow : style.arrow;
+  document.getElementById("selRoute").value = (ref && LINE_ROUTES[ref.route] === 1) ? ref.route : style.route;
   markSwatch("color", ref && ref.color ? ref.color : style.color);
   markSwatch("fill",  ref && ref.fill  ? ref.fill  : style.fill);
 }
@@ -2006,6 +2112,7 @@ function applyStyle(key, value) {
     if (key === "width" && (s.type === "stroke" || s.type === "rect" || s.type === "line")) { s.width = value; changed = true; }
     if (key === "color" && s.type === "line") { s.color = value; changed = true; }
     if (key === "arrow" && s.type === "line") { s.arrow = value; changed = true; }
+    if (key === "route" && s.type === "line") { s.route = value; changed = true; }
   }
   if (changed) pushSnapshot(snap);
   render();
@@ -2013,6 +2120,7 @@ function applyStyle(key, value) {
 document.getElementById("selSize").onchange  = function () { applyStyle("size", parseFloat(this.value)); };
 document.getElementById("selWidth").onchange = function () { applyStyle("width", parseFloat(this.value)); };
 document.getElementById("selArrow").onchange = function () { applyStyle("arrow", this.value); };
+document.getElementById("selRoute").onchange = function () { applyStyle("route", this.value); };
 document.getElementById("props").addEventListener("click", function (e) {
   var b = e.target.closest ? e.target.closest("[data-swatch]") : null;
   if (!b) return;
@@ -2742,14 +2850,16 @@ function distToSegment(ax, ay, bx, by, x, y) {
   var qx = ax + t * dx - x, qy = ay + t * dy - y;
   return Math.sqrt(qx * qx + qy * qy);
 }
-function distToStroke(sh, x, y) {
-  var p = sh.points, best = Infinity;
+/** 折れ線（点の列）と点の距離。手書きと線の当たり判定が共有する */
+function distToPolyline(p, x, y) {
+  if (p.length === 1) return Math.hypot(p[0].x - x, p[0].y - y);
+  var best = Infinity;
   for (var i = 1; i < p.length; i++) {
     best = Math.min(best, distToSegment(p[i - 1].x, p[i - 1].y, p[i].x, p[i].y, x, y));
   }
-  if (p.length === 1) best = Math.hypot(p[0].x - x, p[0].y - y);
   return best;
 }
+function distToStroke(sh, x, y) { return distToPolyline(sh.points, x, y); }
 function hitTest(wx, wy) {
   var list = visibleShapes();
   for (var i = list.length - 1; i >= 0; i--) {
@@ -2761,7 +2871,8 @@ function hitTest(wx, wy) {
       continue;
     }
     if (sh.type === "line") {
-      if (distToSegment(sh.x1, sh.y1, sh.x2, sh.y2, wx, wy) <= sh.width / 2 + 6 / cam.s) return sh;
+      // 折れ線・曲線でも見た目どおりに当たるよう、経路の全区間で最小距離を取る
+      if (distToPolyline(lineGeom(sh).pts, wx, wy) <= sh.width / 2 + 6 / cam.s) return sh;
       continue;
     }
     if (sh.type === "frame") {
@@ -3610,6 +3721,8 @@ function migrate(s) {
   if ((s.type === "line" || s.type === "stroke") && !coord(s.width)) s.width = 2.5;
   // rect の width は上で 1.5 を入れるが、"abc" のような真値は拾えない
   if (s.type === "rect" && !coord(s.width)) s.width = 1.5;
+  // 線の形。項目が無い旧ファイルと、知らない値はどちらも直線に倒す
+  if (s.type === "line") s.route = lineRoute(s);
   return s;
 }
 
@@ -4483,6 +4596,7 @@ window.__WB_TEST__ = {
   num:num, drawableShape:drawableShape, migrate:migrate,
   wrapText:wrapText, textHeight:textHeight, noteHeight:noteHeight,
   sv:sv, bbox:bbox, r2:r2, escapeHtml:escapeHtml, anchorsOf:anchorsOf,
+  lineGeom:lineGeom, lineRoute:lineRoute,
   scaleShape:scaleShape, minScale:minScale,
   keyboardInsertPoint:keyboardInsertPoint,
   load:load, serialize:serialize, buildSVG:buildSVG, render:render,
